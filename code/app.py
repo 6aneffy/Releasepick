@@ -19,6 +19,7 @@ import job_store
 from content_filter import ContentFilterError, assert_plan_safe, scan_plan_dict
 from export_plan_pptx import build_plan_pptx_bytes
 from image_gen import (
+    ENGLISH_LOGO_WORDMARK,
     build_theme_description,
     generate_plan_card_jpegs,
     image_models_for_selectbox,
@@ -29,11 +30,7 @@ from package_export import build_export_zip_bytes
 from pdf_extract import extract_text_from_pdf_bytes
 from plan_llm import generate_plan, translate_plan_to_english
 from render_cards import list_theme_ids
-from template_resources import (
-    load_body_template_text,
-    load_cover_template_text,
-    load_english_logo_bytes,
-)
+from template_resources import load_body_template_text, load_cover_template_text
 
 CODE_DIR = Path(__file__).resolve().parent
 ROOT = CODE_DIR.parent
@@ -363,20 +360,15 @@ def main() -> None:
             horizontal=True,
             key="dc_logo",
         )
-        logo_file = st.file_uploader("로고 PNG (비우면 `AI-Education/logo.png`)", type=["png"], key="dc_logof")
-        if logo_file:
-            st.session_state.logo_bytes = logo_file.getvalue()
         char_file = st.file_uploader("캐릭터 PNG (선택, 전면 AI 생성 시 미사용)", type=["png"], key="dc_char")
         if char_file:
             st.session_state.character_bytes = char_file.getvalue()
         p_logo = CODE_DIR.parents[1] / "logo.png"
         if p_logo.exists():
-            st.caption(f"한국어 카드 기본 로고(업로드 없을 때): `{p_logo}`")
-        en_logo_path = CODE_DIR.parent / "국장님믿고갑조" / "재정경제부 영문로고 파일.png"
-        if en_logo_path.exists():
-            st.caption(f"영문 카드 로고(자동 합성): `{en_logo_path.name}`")
-        elif not load_english_logo_bytes():
-            st.warning("영문 로고 파일을 찾을 수 없습니다: `국장님믿고갑조/재정경제부 영문로고 파일.png`")
+            st.caption(
+                f"로고는 **AI가 카드 이미지 안에 직접** 그립니다. 한글: 「재정경제부」 / "
+                f"영문: 「{ENGLISH_LOGO_WORDMARK}」(스타일 참고: `{p_logo.name}`)"
+            )
 
     img_model_label = st.selectbox(
         "이미지 생성 모델 (카드 전면)",
@@ -404,20 +396,11 @@ def main() -> None:
     out_root = Path(tempfile.gettempdir()) / "cardnews_exports" / st.session_state.session_id
     out_root.mkdir(parents=True, exist_ok=True)
 
-    def _effective_logo() -> bytes | None:
-        if st.session_state.logo_bytes:
-            return st.session_state.logo_bytes
-        p = CODE_DIR.parents[1] / "logo.png"
-        if p.exists():
-            return p.read_bytes()
-        return None
-
-    _ = _effective_logo()
-
     st.caption(
         "카드 생성 시 동일 템플릿·디자인 설정으로 **한국어 세트**를 만든 뒤 기획을 번역해 **영어 세트**를 추가 생성합니다. "
         "(API 호출이 페이지 수의 약 2배입니다.) "
-        "**영문 세트**에는 `재정경제부 영문로고 파일.png`가 선택한 로고 위치에 합성됩니다. "
+        "**한·영 세트** 모두 GPT Image가 **같은 스타일의 정부 로고**를 그리며, 영문만 **"
+        f"{ENGLISH_LOGO_WORDMARK}** 문구로 표시합니다(선택한 **로고 위치** 반영). "
         "일본·북한·식민지 잔재, 정치 이념·갈등(젠더·세대·지역), 혐오 표현은 기획·프롬프트·생성 단계에서 차단됩니다."
     )
     with st.expander("정서·이미지 안전 필터 안내"):

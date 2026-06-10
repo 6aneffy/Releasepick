@@ -15,12 +15,100 @@ from urllib.request import urlopen
 from openai import OpenAI
 
 from content_filter import append_image_safety, assert_plan_safe
-from render_cards import paste_logo_on_image, section_tone_palette
-from template_resources import (
-    load_body_template_text,
-    load_cover_template_text,
-    load_english_logo_bytes,
-)
+from render_cards import get_logo_box, section_tone_palette
+from template_resources import load_body_template_text, load_cover_template_text
+
+LOGO_POS_EN_LABELS: dict[str, str] = {
+    "top_right": "top-right",
+    "top_left": "top-left",
+    "bottom_center": "bottom-center",
+}
+
+
+LOGO_POS_KO_LABELS: dict[str, str] = {
+    "top_right": "우측 상단",
+    "top_left": "좌측 상단",
+    "bottom_center": "하단 중앙",
+}
+
+# 영문 카드 AI 로고에 쓸 공식 영문 기관명 (철자 고정)
+ENGLISH_LOGO_WORDMARK = "Ministry of Finance and Economy"
+KOREAN_LOGO_WORDMARK = "재정경제부"
+
+
+def _logo_layout_tail(logo_pos: str, theme_id: str, *, copy_locale: str) -> str:
+    """AI가 카드 이미지 안에 직접 그릴 로고 지시 (한·영 동일 스타일, 영문만 문구 변경)."""
+    bx, by, bw, bh = get_logo_box(theme_id, logo_pos)
+    x1, y1 = bx + bw, by + bh
+    pad = 28
+    if copy_locale == "en":
+        pos = LOGO_POS_EN_LABELS.get(logo_pos, logo_pos)
+        common = (
+            "[ENGLISH IMAGE — AI-DRAWN LOGO]\n"
+            f"Draw the official Republic of Korea ministry logo INSIDE the image at {pos} "
+            f"(target area x={bx}–{x1}, y={by}–{y1} on 800×1000).\n"
+            "- Same visual style as the Korean card-news government logo: circular red/white/blue "
+            "taegeuk (sam-taegeuk) emblem on the left + horizontal gray sans-serif wordmark on the right.\n"
+            f"- English wordmark text MUST be exactly: \"{ENGLISH_LOGO_WORDMARK}\" "
+            "(spell and capitalize exactly; do NOT use Korean \"재정경제부\" or other English variants).\n"
+            "- No black rectangle behind the logo; logo blends with the card background (transparent look).\n"
+            "- No dashed boxes, 'logo area' labels, or placeholders.\n"
+            "- Logo size and placement should match the Korean series (same corner/foot position).\n"
+        )
+    else:
+        pos = LOGO_POS_KO_LABELS.get(logo_pos, logo_pos)
+        common = (
+            "[한국어 이미지 — AI 생성 로고]\n"
+            f"이미지 안에 공식 정부 로고를 직접 그린다. 위치: {pos} "
+            f"(영역 x={bx}~{x1}, y={by}~{y1}, 800×1000).\n"
+            "- 삼태극(적·청·백) 원형 엠블럼 + 한글 워드마크 "
+            f"「{KOREAN_LOGO_WORDMARK}」(logo.png 공식 스타일과 동일한 회색 고딕).\n"
+            "- 검은 사각형 배경 없이 카드 배경과 자연스럽게 어우러지게.\n"
+            "- placeholder·점선·'로고 영역' 문구 금지.\n"
+        )
+    if logo_pos == "bottom_center":
+        safe_y = max(120, by - pad)
+        if copy_locale == "en":
+            layout = (
+                f"[COPY SAFE ZONE]\n"
+                f"- Logo at bottom center (y≥{by}); keep title/bullets/art above y≈{safe_y}.\n"
+            )
+        else:
+            layout = (
+                f"[문안 안전 영역]\n"
+                f"- 로고는 하단 중앙(y≥{by}); 제목·불릿·일러스트는 y≈{safe_y} 위.\n"
+            )
+    elif logo_pos == "top_right":
+        if copy_locale == "en":
+            layout = (
+                f"[COPY SAFE ZONE]\n"
+                f"- Logo top-right (x≥{bx - pad}, y≤{y1 + pad}); copy/art elsewhere.\n"
+            )
+        else:
+            layout = (
+                f"[문안 안전 영역]\n"
+                f"- 로고 우상단(x≥{bx - pad}, y≤{y1 + pad}); 문안·일러스트는 다른 영역.\n"
+            )
+    else:
+        if copy_locale == "en":
+            layout = (
+                f"[COPY SAFE ZONE]\n"
+                f"- Logo top-left (x≤{x1 + pad}, y≤{y1 + pad}); copy/art elsewhere.\n"
+            )
+        else:
+            layout = (
+                f"[문안 안전 영역]\n"
+                f"- 로고 좌상단(x≤{x1 + pad}, y≤{y1 + pad}); 문안·일러스트는 다른 영역.\n"
+            )
+    return common + layout
+
+
+def build_english_logo_layout_block(logo_pos: str, theme_id: str = "mofe_body") -> str:
+    return _logo_layout_tail(logo_pos, theme_id, copy_locale="en")
+
+
+def build_korean_logo_layout_block(logo_pos: str, theme_id: str = "mofe_body") -> str:
+    return _logo_layout_tail(logo_pos, theme_id, copy_locale="ko")
 
 SECTION_TONE_LABELS: dict[str, str] = {
     "neutral": "기본(블루)",
@@ -173,18 +261,19 @@ def build_first_card_image_prompt(
             "\n[작업 지시]\n"
             "Create ONE finished policy card-news COVER image. "
             "Render ALL visible headline and body copy from [최우선] clearly in natural English. "
-            "Follow the full [표지 디자인 규격] spec below for layout, colors, typography, margins, 3D elements, logo zones, etc. "
+            "Follow the full [표지 디자인 규격] spec below for layout, colors, typography, margins, 3D elements, etc. "
             "The design spec text may be in Korean; apply it as visual/layout rules regardless of language. "
-            f"Leave clear unobstructed space at {logo_pos} for the official MOEF English wordmark overlay; "
-            "do not draw fake ministry logos. Single professional image, no exaggeration."
+            "Draw the government logo per [ENGLISH IMAGE — AI-DRAWN LOGO]. Single professional image."
+            + build_english_logo_layout_block(logo_pos, theme_id)
         )
     else:
         tail = (
             "\n[작업 지시]\n"
             "재정경제부 정책 카드뉴스 '표지' 1장을 생성한다. 위 [최우선] 문안을 한글로 선명하게 배치하고, "
             "[표지 컬러 톤]의 hex 색을 상단 밴드·배지·강조에 반드시 적용한다(템플릿 기본 하늘색 무시). "
-            "[표지 디자인 규격] 전문의 레이아웃·타이포·여백·3D요소·로고 영역 등을 최대한 따른다. "
+            "[표지 디자인 규격]의 레이아웃·타이포·여백·3D요소·정부 로고 배치를 반영한다. "
             "단일 완성 이미지, 정책 홍보용, 과장 없이 전문적으로."
+            + build_korean_logo_layout_block(logo_pos, theme_id)
         )
     tone_block = build_section_tone_prompt_block(
         section_tone, theme_id, for_cover=True, copy_locale=copy_locale
@@ -233,15 +322,16 @@ def build_body_card_image_prompt(
             "Follow the full [본문 디자인 규격] below for canvas, palette, typography, header, capsules, margins, 3D illustration areas, etc. "
             "The spec may be in Korean; use it as strict visual/layout rules. "
             "Place all copy from [최우선] clearly in natural English. "
-            f"Leave clear space at {logo_pos} for MOEF English wordmark overlay; no fake logos. "
-            "Single finished image."
+            "Draw the government logo per [ENGLISH IMAGE — AI-DRAWN LOGO]. Single finished image."
+            + build_english_logo_layout_block(logo_pos, theme_id)
         )
     else:
         tail = (
             "\n[작업 지시]\n"
             "재정경제부 카드뉴스 본문(또는 맺음) 페이지 1장을 생성한다. "
-            "[본문 디자인 규격] 전문의 캔버스·색체·타이포·헤더·캡슐·여백·3D 일러스트 영역 등을 모두 반영하고, "
+            "[본문 디자인 규격]의 캔버스·색체·타이포·헤더·캡슐·여백·3D 일러스트·정부 로고를 반영하고, "
             "위 [최우선] 문안을 한글로 선명하게 배치한다. 단일 완성 이미지."
+            + build_korean_logo_layout_block(logo_pos, theme_id)
         )
     tone_block = build_section_tone_prompt_block(
         section_tone, theme_id, for_cover=False, copy_locale=copy_locale
@@ -358,17 +448,6 @@ def generate_plan_card_jpegs(
             raise RuntimeError(f"페이지 {i + 1} 이미지 생성 실패 (모델: {model})")
         im = Image.open(BytesIO(png_bytes)).convert("RGB")
         im = im.resize(jpeg_size, Image.Resampling.LANCZOS)
-        if copy_locale == "en":
-            en_logo = load_english_logo_bytes()
-            if en_logo:
-                im = paste_logo_on_image(
-                    im,
-                    en_logo,
-                    theme_id=theme_id,
-                    logo_position=logo_pos,
-                )
-            else:
-                logger.warning("English logo not found: %s", "재정경제부 영문로고 파일.png")
         role = slide.get("role", "body")
         fname = f"{i + 1:02d}_{role}.jpg"
         p = out_dir / fname

@@ -79,6 +79,15 @@ def section_tone_palette(theme_id: str, tone_key: str) -> dict[str, str]:
     return _tone(_load_theme(theme_id), tone_key)
 
 
+def get_logo_box(theme_id: str, position: str) -> tuple[int, int, int, int]:
+    """로고 합성 영역 (x, y, width, height) — 800×1000 기준."""
+    theme = _load_theme(theme_id)
+    boxes = theme.get("logo_box") or {}
+    key = position if position in boxes else "bottom_center"
+    box = boxes.get(key) or boxes.get("bottom_center") or [200, 918, 400, 72]
+    return int(box[0]), int(box[1]), int(box[2]), int(box[3])
+
+
 def _draw_text_block(
     draw: ImageDraw.ImageDraw,
     xy: tuple[int, int, int, int],
@@ -142,6 +151,21 @@ def _draw_capsule_label(
     return h + 8
 
 
+def _logo_make_background_transparent(logo: Image.Image, *, threshold: int = 40) -> Image.Image:
+    """로고 PNG 검은/짙은 배경을 투명 처리해 카드 배경과 자연스럽게 합성."""
+    rgba = logo.convert("RGBA")
+    px = rgba.load()
+    w, h = rgba.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a < 10:
+                continue
+            if r <= threshold and g <= threshold and b <= threshold:
+                px[x, y] = (r, g, b, 0)
+    return rgba
+
+
 def _paste_logo(
     base: Image.Image,
     logo_bytes: bytes | None,
@@ -151,25 +175,81 @@ def _paste_logo(
     if not logo_bytes:
         return
     try:
-        logo = Image.open(BytesIO(logo_bytes)).convert("RGBA")
+        logo = _logo_make_background_transparent(Image.open(BytesIO(logo_bytes)))
     except OSError:
         return
     boxes = theme.get("logo_box") or {}
     key = position if position in boxes else "top_right"
     box = boxes.get(key) or boxes.get("top_right") or [588, 40, 160, 56]
     bx0, by0, bw, bh = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    # 한·영 동일: 박스 안에 contain 스케일 후 동일 앵커로 배치
     logo.thumbnail((bw, bh), Image.Resampling.LANCZOS)
     lw, lh = logo.size
     if key == "top_right":
-        x = bx0 + bw - lw
-        y = by0
+        x, y = bx0 + bw - lw, by0
     elif key == "bottom_center":
-        x = bx0 + (bw - lw) // 2
-        y = by0 + (bh - lh) // 2
+        x, y = bx0 + (bw - lw) // 2, by0 + (bh - lh) // 2
     else:
-        x = bx0
-        y = by0
+        x, y = bx0, by0
     base.paste(logo, (x, y), logo)
+
+
+def composite_card_logo(
+    base: Image.Image,
+    logo_bytes: bytes | None,
+    *,
+    theme_id: str = "mofe_body",
+    logo_position: str = "bottom_center",
+    wipe_zone_first: bool = True,
+) -> Image.Image:
+    """카드 이미지에 로고 합성 (한·영 공통)."""
+    return paste_logo_on_image(
+        base,
+        logo_bytes,
+        theme_id=theme_id,
+        logo_position=logo_position,
+        wipe_zone_first=wipe_zone_first,
+    )
+
+
+def wipe_logo_zone(
+    base: Image.Image,
+    theme: dict[str, Any],
+    position: str,
+) -> None:
+    """AI가 그린 가짜 로고·워드마크를 지우고 합성 영역을 비운다."""
+    boxes = theme.get("logo_box") or {}
+    key = position if position in boxes else "top_right"
+    box = boxes.get(key) or boxes.get("top_right") or [588, 40, 160, 56]
+    bx0, by0, bw, bh = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    w, h = base.size
+    pad_x, pad_y = 48, 36
+    if key == "bottom_center":
+        pad_y = 80
+    bx0 = max(0, bx0 - pad_x)
+    by0 = max(0, by0 - pad_y)
+    bw = min(w - bx0, bw + pad_x * 2)
+    bh = min(h - by0, bh + pad_y + (48 if key == "bottom_center" else pad_y))
+    pad = 6
+    samples: list[tuple[int, int, int]] = []
+    if key == "bottom_center":
+        sy = max(0, by0 - bh - pad)
+        for x in range(max(0, bx0), min(w, bx0 + bw), max(8, bw // 8)):
+            samples.append(base.getpixel((x, min(h - 1, sy))))
+    elif key == "top_right":
+        sx = max(0, bx0 - pad - 24)
+        for y in range(by0, min(h, by0 + bh), max(8, bh // 4)):
+            samples.append(base.getpixel((sx, y)))
+    else:
+        sx = min(w - 1, bx0 + bw + pad)
+        for y in range(by0, min(h, by0 + bh), max(8, bh // 4)):
+            samples.append(base.getpixel((sx, y)))
+    if not samples:
+        fill = (248, 250, 252)
+    else:
+        fill = tuple(sum(c[i] for c in samples) // len(samples) for i in range(3))  # type: ignore[assignment]
+    draw = ImageDraw.Draw(base)
+    draw.rectangle((bx0, by0, bx0 + bw, by0 + bh), fill=fill)
 
 
 def paste_logo_on_image(
@@ -178,14 +258,17 @@ def paste_logo_on_image(
     *,
     theme_id: str = "mofe_body",
     logo_position: str = "bottom_center",
+    wipe_zone_first: bool = False,
 ) -> Image.Image:
-    """생성된 카드 JPEG/RGB 이미지 위에 로고 PNG 합성."""
+    """생성된 카드 JPEG/RGB 이미지 위에 로고 PNG 합성 (배경 투명)."""
     if not logo_bytes:
         return base
     theme = _load_theme(theme_id)
-    out = base.copy()
+    out = base.convert("RGBA")
+    if wipe_zone_first:
+        wipe_logo_zone(out, theme, logo_position)
     _paste_logo(out, logo_bytes, theme, logo_position)
-    return out
+    return out.convert("RGB")
 
 
 def _paste_character(base: Image.Image, char_bytes: bytes | None, theme: dict[str, Any]) -> None:

@@ -62,7 +62,7 @@ layout:
 logo_box:
   top_left: [52, 40, 160, 56]
   top_right: [588, 40, 160, 56]
-  bottom_center: [200, 918, 400, 72]
+  bottom_center: [120, 928, 560, 58]
 character_slot:
   bottom_right: [480, 620, 280, 340]
 variants:

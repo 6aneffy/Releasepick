@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from english_logo import load_english_logo_bytes as _load_english_logo_bytes
+
 CODE_DIR = Path(__file__).resolve().parent
 ROOT9 = CODE_DIR.parent
 COVER_TEMPLATE_PATH = ROOT9 / "국장님믿고갑조" / "템플릿(표지).txt"
 BODY_TEMPLATE_PATH = ROOT9 / "국장님믿고갑조" / "템플릿(본문).txt"
-ENGLISH_LOGO_PATH = ROOT9 / "국장님믿고갑조" / "재정경제부 영문로고 파일.png"
 
 
 def load_cover_template_text() -> str:
@@ -25,9 +26,10 @@ def load_body_template_text() -> str:
         return ""
 
 
-def load_english_logo_bytes() -> bytes | None:
-    """영문 카드뉴스 합성용 재정경제부 영문 로고 PNG."""
-    try:
-        return ENGLISH_LOGO_PATH.read_bytes()
-    except OSError:
-        return None
+def load_english_logo_bytes(
+    ko_logo_path: Path | None = None,
+    *,
+    ko_logo_bytes: bytes | None = None,
+) -> bytes | None:
+    """영문 카드뉴스 합성용 — `logo.png` 엠블럼 + Ministry of Finance and Economy (구 영문 PNG 미사용)."""
+    return _load_english_logo_bytes(ko_logo_path, ko_logo_bytes=ko_logo_bytes)
