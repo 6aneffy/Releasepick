@@ -189,8 +189,7 @@ def step_upload(client: OpenAI) -> None:
 
     if not payload:
         st.info(
-            "재정경제부 공식 RSS 에서 최신 보도자료 5건을 가져옵니다. "
-            "첨부 파일이 본문이므로 PDF/HWPX 자동 추출까지 약 5~7초 소요됩니다."
+            "재정경제부 보도·참고자료 게시판에서 최신 5건을 가져옵니다. "
         )
         c_fetch, _ = st.columns([1.3, 4])
         with c_fetch:
@@ -201,10 +200,10 @@ def step_upload(client: OpenAI) -> None:
                 use_container_width=True,
             ):
                 try:
-                    with st.spinner("RSS 조회 + 첨부 메타 수집… (약 5~7초)"):
+                    with st.spinner("보도자료 메타 수집 중..."):
                         items_with_atts = press_release.fetch_items_with_attachments(5)
                     if not items_with_atts:
-                        st.warning("RSS 결과가 비었습니다. 잠시 후 다시 시도하세요.")
+                        st.warning("보도자료 메타 수집 결과가 비었습니다. 잠시 후 다시 시도하세요.")
                     else:
                         st.session_state.press_items_payload = _payload_from_fetch(
                             items_with_atts
@@ -213,14 +212,13 @@ def step_upload(client: OpenAI) -> None:
                         persist()
                         st.rerun()
                 except PressFetchError as exc:
-                    st.error(f"RSS 조회 실패: {exc}")
+                    st.error(f"보도자료 메타 수집 실패: {exc}")
                 except Exception as exc:
-                    st.error(f"RSS 조회 실패: {type(exc).__name__}: {exc}")
+                    st.error(f"보도자료 메타 수집 실패: {type(exc).__name__}: {exc}")
     else:
-        meta_l, meta_r = st.columns([4, 1])
+        meta_l, meta_r = st.columns([5, 1])
         with meta_l:
-            ts = st.session_state.get("press_items_fetched_at")
-            st.caption(f"{len(payload)}건 · {_fmt_relative(ts)}")
+            st.caption("PDF · HWPX 외 첨부 게시물은 카드뉴스 제작 불가")
         with meta_r:
             if st.button(
                 "🔄 새로고침",
@@ -236,13 +234,28 @@ def step_upload(client: OpenAI) -> None:
                 st.rerun()
 
         sel_ntt = st.session_state.get("selected_press_ntt_id")
-        cols = st.columns(2, gap="medium")
+        col_widths = [4.5, 1.2, 1, 1, 1.6]
+        h = st.columns(col_widths)
+        for col, label in zip(h, ["제목", "발행일", "작성자", "형식", "선택"]):
+            col.markdown(
+                f"<div style='font-size:12px;font-weight:700;"
+                f"color:var(--rp-on-surface-variant);"
+                f"padding:6px 0 4px;letter-spacing:0.02em'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            "<div style='border-top:1px solid var(--rp-outline-variant);"
+            "margin:0 0 4px'></div>",
+            unsafe_allow_html=True,
+        )
+
         for idx, entry in enumerate(payload):
             item = entry.get("item", {})
             atts = entry.get("attachments", [])
             ntt_id = item.get("ntt_id", "")
             title = item.get("title", "(제목 없음)")
-            pub_date = item.get("pub_date", "")
+            pub_date_full = item.get("pub_date", "")
+            pub_date = pub_date_full.split(" ")[0] if pub_date_full else ""
             author = item.get("author", "")
             best = pick_best_attachment(
                 [Attachment(**a) for a in atts]
@@ -255,45 +268,67 @@ def step_upload(client: OpenAI) -> None:
                 and not has_pdf
                 and not has_hwpx
             )
+            is_selected = ntt_id == sel_ntt
 
-            with cols[idx % 2]:
-                with st.container(border=(ntt_id == sel_ntt)):
-                    st.markdown(
-                        f"**{title}**"
-                        f"<div style='font-size:12px;color:var(--rp-on-surface-variant);"
-                        f"margin-top:4px'>{pub_date} · {author}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    chips = []
-                    if has_pdf:
-                        chips.append(pill("PDF", "ok"))
-                    if has_hwpx and not has_pdf:
-                        chips.append(pill("HWPX", "info"))
-                    if has_hwp_only:
-                        chips.append(pill("HWP 만 있음 — 선택 불가", "warn"))
-                    if not atts:
-                        chips.append(pill("첨부 없음", "warn"))
-                    st.markdown(
-                        "<div style='margin:8px 0'>" + "".join(chips) + "</div>",
-                        unsafe_allow_html=True,
-                    )
-                    is_selected = ntt_id == sel_ntt
-                    btn_disabled = best is None
-                    btn_label = (
-                        "✓ 선택됨"
-                        if is_selected
-                        else ("이 보도자료로 만들기" if best else "선택 불가")
-                    )
-                    btn_type = "primary" if (best and not is_selected) else "secondary"
-                    if st.button(
-                        btn_label,
-                        key=f"sel_{ntt_id or idx}",
-                        type=btn_type,
-                        disabled=btn_disabled or is_selected,
-                        use_container_width=True,
-                    ):
-                        _select_press_attachment(item, asdict(best))
-                        st.rerun()
+            r = st.columns(col_widths)
+            with r[0]:
+                title_color = (
+                    "var(--rp-primary)" if is_selected else "var(--rp-on-surface)"
+                )
+                prefix = "✓ " if is_selected else ""
+                st.markdown(
+                    f"<div style='font-size:14px;font-weight:600;"
+                    f"color:{title_color};padding:8px 0'>{prefix}{title}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[1]:
+                st.markdown(
+                    f"<div style='font-size:13px;color:var(--rp-on-surface-variant);"
+                    f"padding:9px 0'>{pub_date}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[2]:
+                st.markdown(
+                    f"<div style='font-size:13px;color:var(--rp-on-surface-variant);"
+                    f"padding:9px 0'>{author}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[3]:
+                if has_pdf:
+                    chip = pill("PDF", "ok")
+                elif has_hwpx:
+                    chip = pill("HWPX", "info")
+                elif has_hwp_only:
+                    chip = pill("HWP", "warn")
+                elif not atts:
+                    chip = pill("없음", "warn")
+                else:
+                    chip = pill("기타", "warn")
+                st.markdown(
+                    f"<div style='padding:7px 0'>{chip}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[4]:
+                btn_disabled = best is None
+                btn_label = (
+                    "선택됨" if is_selected
+                    else ("선택" if best else "불가")
+                )
+                btn_type = "primary" if (best and not is_selected) else "secondary"
+                if st.button(
+                    btn_label,
+                    key=f"sel_{ntt_id or idx}",
+                    type=btn_type,
+                    disabled=btn_disabled or is_selected,
+                    use_container_width=True,
+                ):
+                    _select_press_attachment(item, asdict(best))
+                    st.rerun()
+            st.markdown(
+                "<div style='border-top:1px solid var(--rp-outline-variant);"
+                "opacity:0.5;margin:2px 0'></div>",
+                unsafe_allow_html=True,
+            )
 
         if st.session_state.press_text:
             with st.expander("추출 본문 미리보기 (디버깅용)"):
