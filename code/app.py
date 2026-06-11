@@ -44,7 +44,12 @@ from supabase_storage import (
     upload_card_images,
 )
 from template_catalog import page_group
-from template_resources import load_body_template_text, load_cover_template_text
+from template_resources import (
+    DEFAULT_MULTIPAGE_VARIANT,
+    load_body_template_text,
+    load_cover_template_text,
+    multipage_variant_labels,
+)
 
 CODE_DIR = Path(__file__).resolve().parent
 ROOT = CODE_DIR.parent
@@ -87,6 +92,7 @@ def _init_session() -> None:
         "logo_bytes": None,
         "character_bytes": None,
         "target_pages_group": None,
+        "multipage_variant": DEFAULT_MULTIPAGE_VARIANT,
         "instagram_caption": "",
         "instagram_uploaded_post_id": None,
         "instagram_uploaded_keys": [],
@@ -112,6 +118,7 @@ def _snapshot() -> dict:
         "card_paths_en": st.session_state.get("card_paths_en", []),
         "press_text": st.session_state.get("press_text", ""),
         "pdf_name": st.session_state.get("pdf_name", ""),
+        "multipage_variant": st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT),
         "instagram_caption": st.session_state.get("instagram_caption", ""),
         "instagram_uploaded_post_id": st.session_state.get("instagram_uploaded_post_id"),
         "instagram_uploaded_keys": st.session_state.get("instagram_uploaded_keys", []),
@@ -129,6 +136,25 @@ def _log_error(context: str, tb: str) -> None:
             f.write(f"\n=== {context} @ {datetime.now().isoformat()} ===\n{tb}\n")
     except OSError:
         pass
+
+
+def _resolve_design_templates(
+    target_pages: int, multipage_variant: str
+) -> tuple[str, str, bool]:
+    """카드 이미지용 디자인 규격 로드.
+
+    1장이면 themes/template1/템플릿-1.txt만, 2장 이상이면 선택한 변형(v1/v2)의 표지·본문.
+    반환: (cover_full, body_full, single_page).
+    """
+    if target_pages == 1:
+        from template_catalog import load_one_page_template_text
+
+        return load_one_page_template_text(), "", True
+    return (
+        load_cover_template_text(multipage_variant),
+        load_body_template_text(multipage_variant),
+        False,
+    )
 
 
 def _persist() -> None:
@@ -244,6 +270,26 @@ def main() -> None:
     if st.session_state.get("target_pages_group") != pg_group:
         st.session_state.target_pages_group = pg_group
 
+    if target_pages == 1:
+        st.caption("1장 제작 — `themes/template1/템플릿-1.txt` 포스터형 템플릿이 적용됩니다.")
+        multipage_variant = DEFAULT_MULTIPAGE_VARIANT
+    else:
+        _variant_labels = multipage_variant_labels()
+        _variant_ids = list(_variant_labels.keys())
+        _cur_variant = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
+        multipage_variant = st.radio(
+            "디자인 템플릿 (2장 이상)",
+            _variant_ids,
+            index=_variant_ids.index(_cur_variant) if _cur_variant in _variant_ids else 0,
+            format_func=lambda v: _variant_labels.get(v, v),
+            horizontal=True,
+            key="multipage_variant",
+        )
+        st.caption(
+            "선택한 템플릿(표지·본문)이 **기획안과 카드 생성**에 모두 적용됩니다. "
+            "변경 시 기획을 다시 생성하세요."
+        )
+
     if st.button("PDF에서 텍스트 추출", disabled=not st.session_state.pdf_bytes):
         with st.spinner("추출 중…"):
             st.session_state.press_text = extract_text_from_pdf_bytes(st.session_state.pdf_bytes)
@@ -272,6 +318,7 @@ def main() -> None:
                     client,
                     st.session_state.press_text,
                     target_pages=target_pages,
+                    template_variant=multipage_variant,
                 )
                 st.session_state.plan_dict = plan.to_json_dict()
                 st.session_state.plan_phase = "draft"
@@ -376,9 +423,15 @@ def main() -> None:
 
     st.divider()
     st.subheader("3. 디자인 · 이미지 모델")
-    st.caption(
-        "표지·본문 템플릿: `Releasepick/국장님믿고갑조/템플릿(표지).txt`, `템플릿(본문).txt` — 카드 생성 시 GPT Image 프롬프트에 포함됩니다."
-    )
+    if target_pages == 1:
+        st.caption(
+            "1장 제작 — `themes/template1/템플릿-1.txt` 포스터형 템플릿이 카드 생성에 적용됩니다."
+        )
+    else:
+        st.caption(
+            f"선택한 템플릿: **{multipage_variant_labels().get(multipage_variant, multipage_variant)}** "
+            "— 위 '페이지 수' 아래에서 변경할 수 있으며, 카드 생성 시 GPT Image 프롬프트에 포함됩니다."
+        )
     dc1, dc2 = st.columns(2)
     with dc1:
         themes = list_theme_ids()
@@ -484,10 +537,14 @@ def main() -> None:
             st.stop()
         if not _guard_plan(plan_d, context="카드 생성"):
             st.stop()
-        cover_full = load_cover_template_text()
-        body_full = load_body_template_text()
-        if not cover_full.strip() or not body_full.strip():
-            st.error("템플릿 파일을 찾을 수 없습니다. `Releasepick/국장님믿고갑조/` 경로를 확인하세요.")
+        cover_full, body_full, single_page = _resolve_design_templates(
+            target_pages, multipage_variant
+        )
+        if not cover_full.strip() or (not single_page and not body_full.strip()):
+            if single_page:
+                st.error("템플릿 파일을 찾을 수 없습니다. `Releasepick/themes/template1/템플릿-1.txt` 경로를 확인하세요.")
+            else:
+                st.error("템플릿 파일을 찾을 수 없습니다. `Releasepick/themes/template2/` 경로를 확인하세요.")
             st.stop()
         prog = st.progress(0)
         try:
@@ -520,6 +577,7 @@ def main() -> None:
                     logo_pos=logo_pos,
                     title_color=eff_title_color,
                     body_color=eff_body_color,
+                    single_page_template=single_page,
                 )
             st.session_state.card_paths = [str(p) for p in paths_ko]
             st.session_state.card_paths_en = []
@@ -546,6 +604,7 @@ def main() -> None:
                         logo_pos=logo_pos,
                         title_color=eff_title_color,
                         body_color=eff_body_color,
+                        single_page_template=single_page,
                     )
                 st.session_state.card_paths_en = [str(p) for p in paths_en]
                 _persist()
@@ -607,8 +666,12 @@ def main() -> None:
         plan_d = st.session_state.plan_dict
         if not plan_d or not _guard_plan(plan_d, context="카드 다시 생성"):
             st.stop()
-        cover_full = load_cover_template_text()
-        body_full = load_body_template_text()
+        cover_full, body_full, single_page = _resolve_design_templates(
+            target_pages, multipage_variant
+        )
+        if not cover_full.strip() or (not single_page and not body_full.strip()):
+            st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
+            st.stop()
         prog = st.progress(0)
         try:
             nslides = len(plan_d.get("slides") or [])
@@ -640,6 +703,7 @@ def main() -> None:
                     logo_pos=logo_pos,
                     title_color=eff_title_color,
                     body_color=eff_body_color,
+                    single_page_template=single_page,
                 )
             st.session_state.card_paths = [str(p) for p in paths_ko]
             st.session_state.card_paths_en = []
@@ -664,6 +728,7 @@ def main() -> None:
                         logo_pos=logo_pos,
                         title_color=eff_title_color,
                         body_color=eff_body_color,
+                        single_page_template=single_page,
                     )
                 st.session_state.card_paths_en = [str(p) for p in paths_en]
             except Exception as exc_en:

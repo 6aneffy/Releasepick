@@ -73,7 +73,12 @@ def _json_schema_block(target_pages: int) -> str:
     )
 
 
-def _build_system_prompt(*, target_pages: int = 2, max_template_chars: int = 45000) -> str:
+def _build_system_prompt(
+    *,
+    target_pages: int = 2,
+    max_template_chars: int = 45000,
+    template_variant: str | None = None,
+) -> str:
     base = (
         "당신은 대한민국 공공기관 보도자료를 카드뉴스용으로 재구성하는 편집자입니다.\n"
         "입력은 보도자료 전문(한국어)입니다.\n\n"
@@ -88,8 +93,8 @@ def _build_system_prompt(*, target_pages: int = 2, max_template_chars: int = 450
             + "\n\n=== [1장 포스터형 템플릿] 전문 (유일한 디자인·문안 규격) ===\n"
             + one_page
         )
-    cover = _clip_template_text(load_cover_template_text(), max_template_chars)
-    body = _clip_template_text(load_body_template_text(), max_template_chars)
+    cover = _clip_template_text(load_cover_template_text(template_variant), max_template_chars)
+    body = _clip_template_text(load_body_template_text(template_variant), max_template_chars)
     return (
         base
         + "\n\n=== [표지 템플릿] 전문 (첫 페이지 기획 시 전부 반영) ===\n"
@@ -215,14 +220,18 @@ def generate_plan(
     target_pages: int,
     model: str = "gpt-4o-mini",
     concept_style_block: str | None = None,
+    template_variant: str | None = None,
 ) -> CardNewsPlan:
     """기획 LLM 호출 후 정서·이미지 안전 필터를 적용(위반 시 자동 수정 재시도).
 
     concept_style_block: 2단계에서 선택한 디자인 컨셉 설명(기획 프롬프트에 주입).
+    template_variant: 2장 이상 멀티페이지에서 선택한 표지·본문 템플릿 변형(v1/v2).
     """
     if target_pages < 1:
         target_pages = 1
-    system = _build_system_prompt(target_pages=target_pages)
+    system = _build_system_prompt(
+        target_pages=target_pages, template_variant=template_variant
+    )
     user = _build_plan_user_message(
         press_text, target_pages, concept_style_block=concept_style_block
     )

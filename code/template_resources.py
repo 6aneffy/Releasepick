@@ -1,4 +1,4 @@
-"""국장님믿고갑조 템플릿 원문 로드 (표지 / 본문)."""
+"""멀티페이지 카드뉴스 템플릿 원문 로드 (표지 / 본문) — themes/template2 변형 선택."""
 
 from __future__ import annotations
 
@@ -8,20 +8,52 @@ from english_logo import load_english_logo_bytes as _load_english_logo_bytes
 
 CODE_DIR = Path(__file__).resolve().parent
 ROOT9 = CODE_DIR.parent
-COVER_TEMPLATE_PATH = ROOT9 / "국장님믿고갑조" / "템플릿(표지).txt"
-BODY_TEMPLATE_PATH = ROOT9 / "국장님믿고갑조" / "템플릿(본문).txt"
+TEMPLATE2_DIR = ROOT9 / "themes" / "template2"
+
+# 멀티페이지(2장 이상) 디자인 변형. 사용자가 단추로 선택한다.
+MULTIPAGE_TEMPLATE_VARIANTS: dict[str, dict[str, object]] = {
+    "v1": {
+        "label": "재정경제부 1",
+        "cover": TEMPLATE2_DIR / "템플릿1" / "템플릿(표지).txt",
+        "body": TEMPLATE2_DIR / "템플릿1" / "템플릿(본문).txt",
+    },
+    "v2": {
+        "label": "재정경제부2(모모페페 캐릭터)",
+        "cover": TEMPLATE2_DIR / "템플릿2" / "multipage_momopepe_front.txt",
+        "body": TEMPLATE2_DIR / "템플릿2" / "multipage_momopepe_body.txt",
+    },
+}
+DEFAULT_MULTIPAGE_VARIANT = "v1"
+
+# 하위 호환용 (기본 변형 v1)
+COVER_TEMPLATE_PATH = MULTIPAGE_TEMPLATE_VARIANTS["v1"]["cover"]
+BODY_TEMPLATE_PATH = MULTIPAGE_TEMPLATE_VARIANTS["v1"]["body"]
 
 
-def load_cover_template_text() -> str:
+def multipage_variant_labels() -> dict[str, str]:
+    """변형 id → 단추 라벨."""
+    return {k: str(v["label"]) for k, v in MULTIPAGE_TEMPLATE_VARIANTS.items()}
+
+
+def _variant(variant: str | None) -> dict[str, object]:
+    return MULTIPAGE_TEMPLATE_VARIANTS.get(
+        variant or DEFAULT_MULTIPAGE_VARIANT,
+        MULTIPAGE_TEMPLATE_VARIANTS[DEFAULT_MULTIPAGE_VARIANT],
+    )
+
+
+def load_cover_template_text(variant: str | None = DEFAULT_MULTIPAGE_VARIANT) -> str:
+    path = _variant(variant)["cover"]
     try:
-        return COVER_TEMPLATE_PATH.read_text(encoding="utf-8")
+        return Path(path).read_text(encoding="utf-8")
     except OSError:
         return ""
 
 
-def load_body_template_text() -> str:
+def load_body_template_text(variant: str | None = DEFAULT_MULTIPAGE_VARIANT) -> str:
+    path = _variant(variant)["body"]
     try:
-        return BODY_TEMPLATE_PATH.read_text(encoding="utf-8")
+        return Path(path).read_text(encoding="utf-8")
     except OSError:
         return ""
 
