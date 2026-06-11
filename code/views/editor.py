@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
+from dataclasses import asdict
 from pathlib import Path
 
 import streamlit as st
@@ -28,7 +30,15 @@ from image_gen import (
     image_models_for_selectbox,
     resolve_model,
 )
+import press_release
+from hwpx_extract import HwpxExtractError, extract_text_from_hwpx_bytes
 from pdf_extract import extract_text_from_pdf_bytes
+from press_release import (
+    Attachment,
+    PressFetchError,
+    PressItem,
+    pick_best_attachment,
+)
 from plan_llm import generate_plan, translate_plan_to_english
 from render_cards import list_theme_ids
 from supabase_storage import (
@@ -114,47 +124,216 @@ def _resolve_design_templates(
 
 # ---------- Step bodies ----------
 
+def _payload_from_fetch(
+    items_with_atts: list[tuple[PressItem, list[Attachment]]],
+) -> list[dict]:
+    """dataclass 결과를 session_state·snapshot 직렬화 친화 dict 로."""
+    return [
+        {"item": asdict(it), "attachments": [asdict(a) for a in atts]}
+        for it, atts in items_with_atts
+    ]
+
+
+def _fmt_relative(ts: float | None) -> str:
+    if not ts:
+        return ""
+    diff = max(0, int(time.time() - ts))
+    if diff < 60:
+        return f"{diff}초 전 조회"
+    if diff < 3600:
+        return f"{diff // 60}분 전 조회"
+    return f"{diff // 3600}시간 전 조회"
+
+
+def _select_press_attachment(
+    item_dict: dict, att_dict: dict
+) -> None:
+    """선택된 첨부 다운로드 + 텍스트 추출 + 세션 저장."""
+    ext = att_dict.get("ext", "")
+    url = att_dict.get("url", "")
+    filename = att_dict.get("filename", "")
+    try:
+        with st.spinner("첨부 다운로드 → 본문 추출…"):
+            raw = press_release.download_attachment(url)
+            if ext == "pdf":
+                text = extract_text_from_pdf_bytes(raw)
+            elif ext == "hwpx":
+                text = extract_text_from_hwpx_bytes(raw)
+            else:
+                st.error(f"지원하지 않는 첨부 형식: {ext}")
+                return
+            if not text or not text.strip():
+                st.error("본문 추출 결과가 비었습니다. 스캔본일 수 있습니다.")
+                return
+            st.session_state.pdf_bytes = raw
+            st.session_state.pdf_name = filename
+            st.session_state.press_text = text
+            st.session_state.selected_press_ntt_id = item_dict.get("ntt_id")
+            st.session_state.selected_attachment_name = filename
+            st.session_state.selected_attachment_ext = ext
+            persist()
+        st.success(
+            f"본문 추출 완료 ({len(text):,}자) — `{filename}`"
+        )
+    except PressFetchError as exc:
+        st.error(f"다운로드 실패: {exc}")
+    except HwpxExtractError as exc:
+        st.error(f"HWPX 추출 실패: {exc}")
+    except Exception as exc:
+        st.error(f"본문 추출 실패: {type(exc).__name__}: {exc}")
+
+
 def step_upload(client: OpenAI) -> None:
-    section_header(1, "보도자료 PDF 업로드")
-    st.caption("지원 형식: PDF, HWP, HWPX, DOCX (최대 50MB)")
+    section_header(1, "보도자료 선택")
 
-    up = st.file_uploader(
-        "여기에 보도자료를 끌어오거나 파일을 선택하세요",
-        type=["pdf"],
-        label_visibility="collapsed",
-    )
-    if up:
-        st.session_state.pdf_bytes = up.getvalue()
-        st.session_state.pdf_name = up.name
-        persist()
+    payload: list[dict] = list(st.session_state.get("press_items_payload") or [])
 
-    if st.session_state.pdf_bytes:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([2, 1, 1])
-            with c1:
+    if not payload:
+        st.info(
+            "재정경제부 보도·참고자료 게시판에서 최신 5건을 가져옵니다. "
+        )
+        c_fetch, _ = st.columns([1.3, 4])
+        with c_fetch:
+            if st.button(
+                "📰 최신 보도자료 불러오기",
+                type="primary",
+                key="rss_fetch_btn",
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner("보도자료 메타 수집 중..."):
+                        items_with_atts = press_release.fetch_items_with_attachments(5)
+                    if not items_with_atts:
+                        st.warning("보도자료 메타 수집 결과가 비었습니다. 잠시 후 다시 시도하세요.")
+                    else:
+                        st.session_state.press_items_payload = _payload_from_fetch(
+                            items_with_atts
+                        )
+                        st.session_state.press_items_fetched_at = time.time()
+                        persist()
+                        st.rerun()
+                except PressFetchError as exc:
+                    st.error(f"보도자료 메타 수집 실패: {exc}")
+                except Exception as exc:
+                    st.error(f"보도자료 메타 수집 실패: {type(exc).__name__}: {exc}")
+    else:
+        meta_l, meta_r = st.columns([5, 1])
+        with meta_l:
+            st.caption("PDF · HWPX 외 첨부 게시물은 카드뉴스 제작 불가")
+        with meta_r:
+            if st.button(
+                "🔄 새로고침",
+                key="rss_refresh_btn",
+                use_container_width=True,
+            ):
+                press_release.fetch_recent_items.clear()
+                press_release.fetch_attachments.clear()
+                press_release.fetch_items_with_attachments.clear()
+                st.session_state.press_items_payload = []
+                st.session_state.press_items_fetched_at = None
+                persist()
+                st.rerun()
+
+        sel_ntt = st.session_state.get("selected_press_ntt_id")
+        col_widths = [4.5, 1.2, 1, 1, 1.6]
+        h = st.columns(col_widths)
+        for col, label in zip(h, ["제목", "발행일", "작성자", "형식", "선택"]):
+            col.markdown(
+                f"<div style='font-size:12px;font-weight:700;"
+                f"color:var(--rp-on-surface-variant);"
+                f"padding:6px 0 4px;letter-spacing:0.02em'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            "<div style='border-top:1px solid var(--rp-outline-variant);"
+            "margin:0 0 4px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        for idx, entry in enumerate(payload):
+            item = entry.get("item", {})
+            atts = entry.get("attachments", [])
+            ntt_id = item.get("ntt_id", "")
+            title = item.get("title", "(제목 없음)")
+            pub_date_full = item.get("pub_date", "")
+            pub_date = pub_date_full.split(" ")[0] if pub_date_full else ""
+            author = item.get("author", "")
+            best = pick_best_attachment(
+                [Attachment(**a) for a in atts]
+            )
+            available_exts = {a.get("ext", "") for a in atts}
+            has_pdf = "pdf" in available_exts
+            has_hwpx = "hwpx" in available_exts
+            has_hwp_only = (
+                "hwp" in available_exts
+                and not has_pdf
+                and not has_hwpx
+            )
+            is_selected = ntt_id == sel_ntt
+
+            r = st.columns(col_widths)
+            with r[0]:
+                title_color = (
+                    "var(--rp-primary)" if is_selected else "var(--rp-on-surface)"
+                )
+                prefix = "✓ " if is_selected else ""
                 st.markdown(
-                    f"📄 **{st.session_state.pdf_name}**"
-                    f"<br/><span style='font-size:12px;color:var(--rp-on-surface-variant)'>"
-                    f"{len(st.session_state.pdf_bytes) // 1024} KB</span>",
+                    f"<div style='font-size:14px;font-weight:600;"
+                    f"color:{title_color};padding:8px 0'>{prefix}{title}</div>",
                     unsafe_allow_html=True,
                 )
-            with c2:
-                st.markdown(pill("업로드 완료", "ok"), unsafe_allow_html=True)
-            with c3:
-                if st.button("텍스트 추출", use_container_width=True, key="extract_btn"):
-                    with st.spinner("추출 중…"):
-                        st.session_state.press_text = extract_text_from_pdf_bytes(
-                            st.session_state.pdf_bytes
-                        )
-                    if not st.session_state.press_text.strip():
-                        st.warning("추출된 텍스트가 없습니다. 스캔 PDF일 수 있습니다.")
-                    else:
-                        st.success(f"추출 완료 ({len(st.session_state.press_text)}자)")
-                    persist()
+            with r[1]:
+                st.markdown(
+                    f"<div style='font-size:13px;color:var(--rp-on-surface-variant);"
+                    f"padding:9px 0'>{pub_date}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[2]:
+                st.markdown(
+                    f"<div style='font-size:13px;color:var(--rp-on-surface-variant);"
+                    f"padding:9px 0'>{author}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[3]:
+                if has_pdf:
+                    chip = pill("PDF", "ok")
+                elif has_hwpx:
+                    chip = pill("HWPX", "info")
+                elif has_hwp_only:
+                    chip = pill("HWP", "warn")
+                elif not atts:
+                    chip = pill("없음", "warn")
+                else:
+                    chip = pill("기타", "warn")
+                st.markdown(
+                    f"<div style='padding:7px 0'>{chip}</div>",
+                    unsafe_allow_html=True,
+                )
+            with r[4]:
+                btn_disabled = best is None
+                btn_label = (
+                    "선택됨" if is_selected
+                    else ("선택" if best else "불가")
+                )
+                btn_type = "primary" if (best and not is_selected) else "secondary"
+                if st.button(
+                    btn_label,
+                    key=f"sel_{ntt_id or idx}",
+                    type=btn_type,
+                    disabled=btn_disabled or is_selected,
+                    use_container_width=True,
+                ):
+                    _select_press_attachment(item, asdict(best))
+                    st.rerun()
+            st.markdown(
+                "<div style='border-top:1px solid var(--rp-outline-variant);"
+                "opacity:0.5;margin:2px 0'></div>",
+                unsafe_allow_html=True,
+            )
 
-    if st.session_state.press_text:
-        with st.expander("추출 텍스트 미리보기"):
-            st.text(st.session_state.press_text[:8000])
+        if st.session_state.press_text:
+            with st.expander("추출 본문 미리보기 (디버깅용)"):
+                st.text(st.session_state.press_text[:8000])
 
     st.divider()
     with st.container(border=True):
