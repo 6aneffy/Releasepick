@@ -222,6 +222,13 @@ def recommend_concept_id(press_text: str, target_pages: int) -> str:
     return best_id
 
 
+def load_one_page_template_text() -> str:
+    try:
+        return GUIDE_1PAGE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def load_guide_excerpt(target_pages: int, max_chars: int = 4000) -> str:
     path = GUIDE_1PAGE if target_pages == 1 else GUIDE_MULTIPAGE
     try:

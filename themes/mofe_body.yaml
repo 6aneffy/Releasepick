@@ -1,7 +1,7 @@
-# 재정경제부 카드뉴스 본문 템플릿 (참고: 국장님믿고갑조/템플릿(본문).txt)
+# 재정경제부 카드뉴스 본문 템플릿 (참고: themes/template2/템플릿1/템플릿(본문).txt)
 id: mofe_body
 label: 본문형 800×1000 (템플릿 본문)
-ref: 국장님믿고갑조/템플릿(본문).txt
+ref: themes/template2/템플릿1/템플릿(본문).txt
 canvas:
   width: 800
   height: 1000

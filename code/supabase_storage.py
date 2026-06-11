@@ -63,13 +63,18 @@ def upload_card_images(local_paths: list[Path], session_id: str) -> list[Uploade
         key = f"posts/{session_id}/{ts}/{p.name}"
         encoded = _encode_key(key)
         upload_url = f"{base_url}/storage/v1/object/{bucket}/{encoded}"
-        with p.open("rb") as f:
-            resp = requests.post(
-                upload_url,
-                data=f.read(),
-                headers=_headers(service_key, content_type=_guess_content_type(p)),
-                timeout=_TIMEOUT,
-            )
+        try:
+            with p.open("rb") as f:
+                resp = requests.post(
+                    upload_url,
+                    data=f.read(),
+                    headers=_headers(service_key, content_type=_guess_content_type(p)),
+                    timeout=_TIMEOUT,
+                )
+        except requests.RequestException as exc:
+            raise SupabaseStorageError(
+                f"Supabase 연결 실패 ({base_url}): {exc}"
+            ) from exc
         if resp.status_code >= 300:
             raise SupabaseStorageError(
                 f"업로드 실패 {p.name}: {resp.status_code} {resp.text}"
@@ -83,12 +88,17 @@ def get_url(key: str, expires_sec: int = 3600) -> str:
     base_url, service_key, bucket = _config()
     encoded = _encode_key(key)
     sign_url = f"{base_url}/storage/v1/object/sign/{bucket}/{encoded}"
-    resp = requests.post(
-        sign_url,
-        json={"expiresIn": expires_sec},
-        headers=_headers(service_key, content_type="application/json"),
-        timeout=_TIMEOUT,
-    )
+    try:
+        resp = requests.post(
+            sign_url,
+            json={"expiresIn": expires_sec},
+            headers=_headers(service_key, content_type="application/json"),
+            timeout=_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise SupabaseStorageError(
+            f"Supabase 연결 실패 ({base_url}): {exc}"
+        ) from exc
     if resp.status_code < 300:
         data = resp.json()
         signed_path = data.get("signedURL") or data.get("signedUrl")
