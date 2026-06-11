@@ -46,9 +46,41 @@ _HEADERS = {
     "User-Agent": _UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
 }
-_TIMEOUT = 15
-_SLEEP = 0.6
+_TIMEOUT = 20
+_SLEEP = 0.8
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = (1.5, 3.0, 6.0)
+
+
+def _make_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(_HEADERS)
+    return s
+
+
+def _get(session: requests.Session, url: str, *, stream: bool = False) -> requests.Response:
+    """ConnectionReset 등 일시 오류는 백오프 재시도."""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return session.get(url, timeout=_TIMEOUT, stream=stream)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF[attempt])
+    raise PressFetchError(
+        f"네트워크 오류 (재시도 {_MAX_RETRIES}회 실패): {last_exc}"
+    )
 
 _LABEL_TAIL_RE = re.compile(
     r"\s*(다운로드|미리보기|바로보기|새창|새창열림|아이콘)\s*$"
@@ -98,7 +130,8 @@ def _ext_of(name: str) -> str:
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_recent_items(limit: int = 5) -> list[PressItem]:
     """RSS 2.0 파싱. item 필드: title, link, tag(=nttId), pubDate, author."""
-    resp = requests.get(RSS_URL, headers=_HEADERS, timeout=_TIMEOUT)
+    sess = _make_session()
+    resp = _get(sess, RSS_URL)
     if resp.status_code != 200:
         raise PressFetchError(f"RSS HTTP {resp.status_code}")
     try:
@@ -129,8 +162,9 @@ def fetch_recent_items(limit: int = 5) -> list[PressItem]:
     return items
 
 
-def _detail_html(detail_url: str) -> str:
-    resp = requests.get(detail_url, headers=_HEADERS, timeout=_TIMEOUT)
+def _detail_html(detail_url: str, session: requests.Session | None = None) -> str:
+    sess = session if session is not None else _make_session()
+    resp = _get(sess, detail_url)
     if resp.status_code != 200:
         raise PressFetchError(f"상세 HTTP {resp.status_code}")
     resp.encoding = resp.apparent_encoding or "utf-8"
@@ -143,17 +177,13 @@ def _clean_name(raw: str) -> str:
     return s
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_attachments(detail_url: str) -> list[Attachment]:
-    """상세 페이지 → BeautifulSoup → 첨부 파일명·다운로드 URL 추출.
-
-    필터:
-    - FileDown.do 만. AtchZipFileDown (전체 압축) 과 synapView (뷰어) 제외
-    - anchor text 에서 라벨 꼬리 ("다운로드 아이콘" 등) 제거
-    - 확장자 미상 (etc) 항목 제외 — 같은 URL 의 다른 anchor 에 실제 파일명이 있음
-    - URL 단위 중복 제거 (같은 fileSn 의 이름 + 아이콘 anchor 두 개 → 하나만)
+def _parse_attachments_from_html(html: str) -> list[Attachment]:
+    """HTML 만 받아 첨부 메타 추출. 필터:
+    - FileDown.do 만. AtchZipFileDown / synapView 제외
+    - anchor text 라벨 꼬리 제거
+    - 확장자 미상 (etc) 항목 제외
+    - URL 단위 중복 제거
     """
-    html = _detail_html(detail_url)
     soup = BeautifulSoup(html, "html.parser")
     seen_urls: set[str] = set()
     out: list[Attachment] = []
@@ -173,6 +203,13 @@ def fetch_attachments(detail_url: str) -> list[Attachment]:
         seen_urls.add(url)
         out.append(Attachment(filename=name, url=url, ext=ext))
     return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_attachments(detail_url: str) -> list[Attachment]:
+    """상세 페이지 GET → 첨부 메타 추출. (개별 호출용 — 일반적으로
+    `fetch_items_with_attachments` 가 단일 세션으로 묶어 호출함.)"""
+    return _parse_attachments_from_html(_detail_html(detail_url))
 
 
 _PRIORITY = ("pdf", "hwpx", "hwp")
@@ -195,14 +232,45 @@ def pick_best_attachment(attachments: Iterable[Attachment]) -> Attachment | None
 def fetch_items_with_attachments(
     limit: int = 5,
 ) -> list[Tuple[PressItem, list[Attachment]]]:
-    """RSS + 각 상세 페이지 → 한 번에 카드 그릴 메타 모두 반환."""
-    items = fetch_recent_items(limit=limit)
+    """RSS + 각 상세 페이지 → 한 번에 카드 그릴 메타 모두 반환.
+
+    모든 요청은 단일 Session 으로 진행 (keep-alive · 쿠키 유지).
+    """
+    sess = _make_session()
+    # RSS
+    resp = _get(sess, RSS_URL)
+    if resp.status_code != 200:
+        raise PressFetchError(f"RSS HTTP {resp.status_code}")
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError as exc:
+        raise PressFetchError(f"RSS XML 파싱 실패: {exc}") from exc
+
+    items: list[PressItem] = []
+    for el in root.iter("item"):
+        if len(items) >= limit:
+            break
+        title = (el.findtext("title") or "").strip()
+        link = _normalize_link((el.findtext("link") or "").strip())
+        ntt_id = (el.findtext("tag") or "").strip()
+        pub_date = (el.findtext("pubDate") or "").strip()
+        author = (el.findtext("author") or "").strip()
+        if not (title and link and ntt_id):
+            continue
+        items.append(
+            PressItem(
+                title=title, link=link, ntt_id=ntt_id,
+                pub_date=pub_date, author=author,
+            )
+        )
+
     out: list[Tuple[PressItem, list[Attachment]]] = []
     for i, item in enumerate(items):
         if i > 0:
             time.sleep(_SLEEP)
         try:
-            atts = fetch_attachments(item.link)
+            html = _detail_html(item.link, session=sess)
+            atts = _parse_attachments_from_html(html)
         except PressFetchError:
             atts = []
         out.append((item, atts))
@@ -210,11 +278,23 @@ def fetch_items_with_attachments(
 
 
 def download_attachment(url: str) -> bytes:
-    """첨부 바이너리 다운로드. Referer 부착 (일부 정부 사이트는 요구)."""
+    """첨부 바이너리 다운로드. Referer 부착 + 재시도."""
     parsed = urlsplit(url)
     referer = f"{parsed.scheme}://{parsed.netloc}/"
-    headers = {**_HEADERS, "Referer": referer}
-    resp = requests.get(url, headers=headers, timeout=30, stream=True)
-    if resp.status_code != 200:
-        raise PressFetchError(f"첨부 다운로드 HTTP {resp.status_code}")
-    return resp.content
+    sess = _make_session()
+    sess.headers["Referer"] = referer
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = sess.get(url, timeout=60, stream=True)
+            if resp.status_code != 200:
+                raise PressFetchError(f"첨부 다운로드 HTTP {resp.status_code}")
+            return resp.content
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF[attempt])
+    raise PressFetchError(
+        f"첨부 다운로드 실패 (재시도 {_MAX_RETRIES}회): {last_exc}"
+    )
