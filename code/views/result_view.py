@@ -13,6 +13,7 @@ from content_filter import ContentFilterError
 from export_plan_pptx import build_plan_pptx_bytes
 from image_gen import (
     build_theme_description,
+    design_variant_block,
     generate_plan_card_jpegs,
     image_models_for_selectbox,
     resolve_model,
@@ -20,7 +21,7 @@ from image_gen import (
 from models import CardNewsPlan
 from package_export import build_export_zip_bytes
 from plan_llm import translate_plan_to_english
-from template_catalog import concept_image_block, load_one_page_template_text
+from template_catalog import load_one_page_template_text
 from template_resources import (
     DEFAULT_MULTIPAGE_VARIANT,
     load_body_template_text,
@@ -185,18 +186,14 @@ def _regenerate_all(client: OpenAI) -> None:
     img_model = resolve_model(img_model_label)
     da = _design_args()
     theme_desc = build_theme_description(**da)
-    img_concept_block = concept_image_block(
-        st.session_state.concept_template_id
-        if st.session_state.concept_confirmed
-        else None
-    )
+    variant_block = design_variant_block(st.session_state.get("selected_variant"))
     title_color = da["title_color"] if da["use_custom_title"] else None
     body_color = da["body_color"] if da["use_custom_body"] else None
 
     prog = st.progress(0)
     try:
         nslides = len(plan_d.get("slides") or [])
-        total_steps = max(1, nslides * 2)
+        total_steps = max(1, nslides)
         done = [0]
 
         def _p(_c: int, _t: int) -> None:
@@ -211,7 +208,7 @@ def _regenerate_all(client: OpenAI) -> None:
             section_tone=da["section_tone"],
             theme_id=da["theme_id"],
             logo_pos=da["logo_pos"],
-            concept_style_block=img_concept_block,
+            concept_style_block=variant_block,
             single_page_template=single_page,
             title_color=title_color,
             body_color=body_color,
@@ -222,25 +219,90 @@ def _regenerate_all(client: OpenAI) -> None:
                 out_dir=ko_dir, copy_locale="ko", **common,
             )
         st.session_state.card_paths = [str(p) for p in paths_ko]
+        st.session_state.card_paths_en = []
         persist()
-        try:
-            with st.spinner(f"영어 카드 재생성… ({img_model})"):
-                plan_en = translate_plan_to_english(client, plan_d)
-                paths_en = generate_plan_card_jpegs(
-                    client, img_model, plan_en,
-                    out_dir=en_dir, copy_locale="en", **common,
-                )
-            st.session_state.card_paths_en = [str(p) for p in paths_en]
-        except Exception as exc:
-            st.warning(f"영어 카드 재생성 실패 (한국어는 정상): {exc}")
         if st.session_state.card_revisions_remaining > 0:
             st.session_state.card_revisions_remaining -= 1
         persist()
-        st.toast("재생성 완료")
+        st.toast("한국어 재생성 완료 — 영어 세트는 비워짐. 다시 승인 후 영어 생성.")
     except ContentFilterError as exc:
         st.error(str(exc))
     except Exception as exc:
         st.error(f"재생성 실패: {exc}")
+    finally:
+        prog.empty()
+    st.rerun()
+
+
+def _generate_english(client: OpenAI) -> None:
+    widgets_into_plan_dict()
+    plan_d = st.session_state.plan_dict
+    if not plan_d or not guard_plan(plan_d, context="영어 카드 생성"):
+        st.stop()
+    target_pages = st.session_state.get("target_pages", 5)
+    mv = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
+    if target_pages == 1:
+        cover_full = load_one_page_template_text()
+        body_full = ""
+        single_page = True
+    else:
+        cover_full = load_cover_template_text(mv)
+        body_full = load_body_template_text(mv)
+        single_page = False
+    if not cover_full.strip() or (not single_page and not body_full.strip()):
+        st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
+        st.stop()
+
+    out_root = Path(
+        st.session_state.get("_out_root")
+        or (Path(tempfile.gettempdir()) / "cardnews_exports" / st.session_state.session_id)
+    )
+    en_dir = out_root / "cards" / "en"
+    en_dir.mkdir(parents=True, exist_ok=True)
+
+    img_model_label = st.session_state.get("dc_imgmodel") or image_models_for_selectbox()[0]
+    img_model = resolve_model(img_model_label)
+    da = _design_args()
+    theme_desc = build_theme_description(**da)
+    title_color = da["title_color"] if da["use_custom_title"] else None
+    body_color = da["body_color"] if da["use_custom_body"] else None
+    variant_block = design_variant_block(st.session_state.get("selected_variant"))
+
+    prog = st.progress(0)
+    try:
+        nslides = len(plan_d.get("slides") or [])
+        total_steps = max(1, nslides)
+        done = [0]
+
+        def _pe(_c: int, _t: int) -> None:
+            done[0] += 1
+            prog.progress(min(1.0, done[0] / total_steps))
+
+        with st.spinner(f"영어 번역 → 영어 카드 생성 중… ({img_model})"):
+            plan_en = translate_plan_to_english(client, plan_d)
+            paths_en = generate_plan_card_jpegs(
+                client, img_model, plan_en,
+                theme_desc=theme_desc,
+                out_dir=en_dir,
+                cover_template_full=cover_full,
+                body_template_full=body_full,
+                progress_callback=_pe if nslides else None,
+                copy_locale="en",
+                section_tone=da["section_tone"],
+                theme_id=da["theme_id"],
+                logo_pos=da["logo_pos"],
+                concept_style_block=variant_block,
+                title_color=title_color,
+                body_color=body_color,
+                single_page_template=single_page,
+            )
+        st.session_state.card_paths_en = [str(p) for p in paths_en]
+        persist()
+        st.success(f"영어 {len(paths_en)}장 생성 완료.")
+    except ContentFilterError as exc:
+        st.error(str(exc))
+    except Exception as exc:
+        st.error(f"영어 카드 생성 실패: {type(exc).__name__}: {exc}")
     finally:
         prog.empty()
     st.rerun()
@@ -253,22 +315,14 @@ def _action_bar(client: OpenAI) -> None:
     paths_en = [
         Path(p) for p in st.session_state.get("card_paths_en", []) if Path(p).exists()
     ]
+    approved = st.session_state.card_review_approved
 
     a, b, c, d = st.columns(4)
 
     with a:
-        st.button(
-            "선택 페이지 다시 생성",
-            disabled=True,
-            help="현재 버전은 전체 재생성만 지원합니다.",
-            use_container_width=True,
-        )
-
-    with b:
-        approved = st.session_state.card_review_approved
         if not approved:
             if st.button(
-                "검토 승인 (재생성 2회)",
+                "한국어 승인 → 영어 단계",
                 disabled=not paths_ko,
                 use_container_width=True,
                 key="rv_approve_btn",
@@ -279,12 +333,23 @@ def _action_bar(client: OpenAI) -> None:
                 st.rerun()
         else:
             if st.button(
-                f"전체 재생성 (남은 {st.session_state.card_revisions_remaining})",
+                f"한국어 재생성 (남은 {st.session_state.card_revisions_remaining})",
                 disabled=st.session_state.card_revisions_remaining <= 0,
                 use_container_width=True,
-                key="rv_regen_btn",
+                key="rv_regen_ko_btn",
             ):
                 _regenerate_all(client)
+
+    with b:
+        en_label = "영어 카드 재생성" if paths_en else "영어 카드 생성"
+        if st.button(
+            en_label,
+            type="primary" if (approved and not paths_en) else "secondary",
+            disabled=not approved or not paths_ko,
+            use_container_width=True,
+            key="rv_gen_en_btn",
+        ):
+            _generate_english(client)
 
     with c:
         if plan_d:

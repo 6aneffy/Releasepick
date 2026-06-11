@@ -156,6 +156,68 @@ def _decode_response(resp: Any) -> bytes | None:
 
 PROMPT_MAX_CHARS = 28_000
 
+# 위 [최우선] 블록의 항목 이름(라벨)이 이미지에 그대로 그려지는 것을 막는다.
+_LABEL_GUARD = (
+    "\n[문안 표기 규칙 — 매우 중요]\n"
+    "위 항목 이름(`시리즈명`, `헤드카피`, `역할`, `슬라이드 제목`, `표지 슬라이드 제목`, "
+    "`표지 보조 불릿`, `불릿`, `각주`, `참고` 등)과 콜론(`:`)은 내용 분류용 메타데이터일 뿐이다. "
+    "이 라벨 단어와 콜론은 절대 이미지에 글자로 그리지 말 것. 라벨 뒤의 실제 값(문안)만 디자인 요소로 렌더링한다.\n"
+    "Do NOT render any of these field labels (e.g. '시리즈명:', '헤드카피:', '역할:', '각주:') or their colons as visible text. "
+    "Only render the actual copy values, never the field names.\n"
+)
+
+
+# 표지(1페이지) 디자인 시안 3종 — 레이아웃 배치 / 폰트 정렬 / 3D 소스를 달리한다.
+# 선택한 시안의 block을 concept_style_block으로 전달하면 표지·본문 전체에 동일 스타일이 적용된다.
+DESIGN_VARIANTS: dict[str, dict[str, str]] = {
+    "A": {
+        "label": "시안 A · 중앙 집중형",
+        "block": (
+            "[디자인 시안 A — 중앙 집중형 (레이아웃에 최우선 반영)]\n"
+            "- 구도: 핵심 헤드라인을 상단~중앙에 크게 두고, 대표 3D 비주얼을 화면 정중앙에 '단일 대형'으로 배치한다.\n"
+            "- 폰트 정렬: 모든 텍스트 가운데 정렬(center). 헤드라인은 굵고 큰 1~2줄.\n"
+            "- 3D 소스: 주제를 상징하는 '하나의 큰 3D 오브젝트(또는 캐릭터)'를 중심에 둔다. 사실적 매트 3D 렌더, 누끼+부드러운 그림자.\n"
+            "- 여백: 좌우 대칭, 시원한 여백으로 안정감 있는 인상.\n"
+        ),
+    },
+    "B": {
+        "label": "시안 B · 좌측 텍스트 / 우측 비주얼",
+        "block": (
+            "[디자인 시안 B — 좌측 텍스트 · 우측 비주얼 (레이아웃에 최우선 반영)]\n"
+            "- 구도: 화면을 좌우로 나눠 왼쪽에 텍스트(헤드라인·서브), 오른쪽에 3D 비주얼을 배치한다.\n"
+            "- 폰트 정렬: 텍스트 왼쪽 정렬(left). 헤드라인은 좌측 상단에서 시작한다.\n"
+            "- 3D 소스: 캐릭터 1~2개 + 보조 오브젝트를 묶은 '그룹 구성'을 오른쪽에 배치한다.\n"
+            "- 비대칭 균형: 왼쪽 텍스트 블록과 오른쪽 비주얼이 무게중심을 이루도록 한다.\n"
+        ),
+    },
+    "C": {
+        "label": "시안 C · 상단 헤드라인 / 하단 비주얼 밴드",
+        "block": (
+            "[디자인 시안 C — 상단 헤드라인 · 하단 비주얼 밴드 (레이아웃에 최우선 반영)]\n"
+            "- 구도: 상단에 큰 헤드라인 영역, 하단에 가로로 펼쳐지는 3D 비주얼 밴드(장면/오브젝트 나열)를 배치한다.\n"
+            "- 폰트 정렬: 헤드라인은 상단 고정, 좌측 또는 가운데 정렬. 보조 텍스트는 헤드라인 바로 아래.\n"
+            "- 3D 소스: 여러 개의 작은 3D 아이콘/오브젝트를 하단에 리듬감 있게 나열한다.\n"
+            "- 층위: 위(텍스트)–아래(비주얼)의 수평 띠 구조로 정보 위계를 만든다.\n"
+        ),
+    },
+}
+
+
+def design_variant_ids() -> list[str]:
+    return list(DESIGN_VARIANTS.keys())
+
+
+def design_variant_label(variant_id: str) -> str:
+    v = DESIGN_VARIANTS.get(variant_id)
+    return v["label"] if v else str(variant_id)
+
+
+def design_variant_block(variant_id: str | None) -> str:
+    if not variant_id:
+        return ""
+    v = DESIGN_VARIANTS.get(variant_id)
+    return v["block"] if v else ""
+
 
 def _clip_middle(s: str, max_len: int) -> str:
     if len(s) <= max_len:
@@ -303,6 +365,7 @@ def build_first_card_image_prompt(
         f"표지 슬라이드 제목: {slide.get('title', '')}\n"
         f"표지 보조 불릿:\n{blines}\n"
         f"각주: {foot}\n"
+        + _LABEL_GUARD
     )
     if single_page_template:
         if copy_locale == "en":
@@ -397,6 +460,7 @@ def build_body_card_image_prompt(
         f"슬라이드 제목: {slide.get('title', '')}\n"
         f"불릿:\n{blines}\n"
         f"각주: {foot}\n"
+        + _LABEL_GUARD
     )
     if copy_locale == "en":
         tail = (
@@ -565,3 +629,74 @@ def generate_plan_card_jpegs(
         if progress_callback is not None:
             progress_callback(i + 1, total)
     return paths
+
+
+def generate_cover_variant_jpegs(
+    client: OpenAI,
+    model: str,
+    plan_dict: dict[str, Any],
+    *,
+    theme_desc: str,
+    out_dir: Path,
+    cover_template_full: str,
+    variant_ids: list[str] | None = None,
+    jpeg_size: tuple[int, int] = (800, 1000),
+    quality: int = 92,
+    copy_locale: str = "ko",
+    section_tone: str = "blue",
+    theme_id: str = "mofe_body",
+    logo_pos: str = "bottom_center",
+    single_page_template: bool = False,
+    title_color: str | None = None,
+    body_color: str | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Path]:
+    """표지(1페이지)만 디자인 시안별로 생성한다. 반환: {variant_id: jpeg_path}."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    if single_page_template and not cover_template_full:
+        from template_catalog import load_one_page_template_text
+
+        cover_template_full = load_one_page_template_text()
+    elif not cover_template_full:
+        cover_template_full = load_cover_template_text()
+
+    assert_plan_safe(plan_dict)
+    slides = plan_dict.get("slides") or []
+    if not slides:
+        raise RuntimeError("기획안에 슬라이드가 없습니다.")
+    slide0 = slides[0]
+    if not variant_ids:
+        variant_ids = design_variant_ids()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Path] = {}
+    total = len(variant_ids)
+    for idx, vid in enumerate(variant_ids):
+        prompt = build_first_card_image_prompt(
+            plan_dict,
+            slide0,
+            cover_template_full=cover_template_full,
+            theme_desc=theme_desc,
+            copy_locale=copy_locale,
+            section_tone=section_tone,
+            theme_id=theme_id,
+            logo_pos=logo_pos,
+            concept_style_block=design_variant_block(vid),
+            single_page_template=single_page_template,
+            title_color=title_color,
+            body_color=body_color,
+        )
+        png_bytes = generate_image_png_bytes(client, model, prompt)
+        if not png_bytes:
+            raise RuntimeError(f"시안 {vid} 표지 생성 실패 (모델: {model})")
+        im = Image.open(BytesIO(png_bytes)).convert("RGB").resize(
+            jpeg_size, Image.Resampling.LANCZOS
+        )
+        p = out_dir / f"cover_variant_{vid}.jpg"
+        im.save(p, format="JPEG", quality=quality, optimize=True)
+        result[vid] = p
+        if progress_callback is not None:
+            progress_callback(idx + 1, total)
+    return result
