@@ -28,6 +28,10 @@ from export_plan_pptx import build_plan_pptx_bytes
 from image_gen import (
     ENGLISH_LOGO_WORDMARK,
     build_theme_description,
+    design_variant_block,
+    design_variant_ids,
+    design_variant_label,
+    generate_cover_variant_jpegs,
     generate_plan_card_jpegs,
     image_models_for_selectbox,
     resolve_model,
@@ -89,6 +93,7 @@ def _init_session() -> None:
         "card_paths_en": [],
         "card_review_approved": False,
         "card_revisions_remaining": 0,
+        "cover_variants": {},
         "logo_bytes": None,
         "character_bytes": None,
         "target_pages_group": None,
@@ -506,8 +511,8 @@ def main() -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     st.caption(
-        "카드 생성 시 동일 템플릿·디자인 설정으로 **한국어 세트**를 만든 뒤 기획을 번역해 **영어 세트**를 추가 생성합니다. "
-        "(API 호출이 페이지 수의 약 2배입니다.) "
+        "**2단계 생성** — ① 먼저 **한국어 세트**만 만듭니다. ② 아래 **5. 산출물 검토**에서 한국어를 승인하면 "
+        "그때 기획을 번역해 **영어 세트**를 생성합니다. "
         "**한·영 세트** 모두 GPT Image가 **같은 스타일의 정부 로고**를 그리며, 영문만 **"
         f"{ENGLISH_LOGO_WORDMARK}** 문구로 표시합니다(선택한 **로고 위치** 반영). "
         "일본·북한·식민지 잔재, 정치 이념·갈등(젠더·세대·지역), 혐오 표현은 기획·프롬프트·생성 단계에서 차단됩니다."
@@ -525,9 +530,105 @@ def main() -> None:
             f"카드를 생성하려면 먼저 **2. 기획안** 단계에서 기획을 확정해야 합니다. "
             f"(현재 단계: `{_gen_phase}`) → '기획 1차 승인' 후 '기획 확정 → 카드 생성 단계로'를 누르세요."
         )
+
+    st.markdown("**① 표지 디자인 시안 3종 생성** — 레이아웃·폰트 정렬·3D 소스를 달리한 표지(1페이지) 시안")
     if st.button(
-        "카드 생성 (첫 렌더)",
+        "표지 시안 3종 생성",
         disabled=_gen_phase != "locked" or not st.session_state.plan_dict,
+        key="btn_variants",
+        help="기획안 1페이지(표지)를 기준으로 서로 다른 디자인 시안 3종을 만듭니다.",
+    ):
+        _widgets_into_plan_dict()
+        plan_d = st.session_state.plan_dict
+        if not plan_d or not _guard_plan(plan_d, context="표지 시안 생성"):
+            st.stop()
+        cover_full, body_full, single_page = _resolve_design_templates(
+            target_pages, multipage_variant
+        )
+        if not cover_full.strip():
+            st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
+            st.stop()
+        var_dir = out_root / "cover_variants"
+        var_dir.mkdir(parents=True, exist_ok=True)
+        prog = st.progress(0)
+        try:
+            vids = design_variant_ids()
+            done = [0]
+
+            def _prog_v(_cur: int, _total: int) -> None:
+                done[0] += 1
+                prog.progress(min(1.0, done[0] / max(1, len(vids))))
+
+            with st.spinner(f"표지 시안 {len(vids)}종 생성 중… ({img_model})"):
+                variants = generate_cover_variant_jpegs(
+                    client,
+                    img_model,
+                    plan_d,
+                    theme_desc=theme_desc,
+                    out_dir=var_dir,
+                    cover_template_full=cover_full,
+                    variant_ids=vids,
+                    copy_locale="ko",
+                    section_tone=section_tone,
+                    theme_id=theme_id,
+                    logo_pos=logo_pos,
+                    title_color=eff_title_color,
+                    body_color=eff_body_color,
+                    single_page_template=single_page,
+                    progress_callback=_prog_v,
+                )
+            st.session_state.cover_variants = {k: str(v) for k, v in variants.items()}
+            st.session_state.card_paths = []
+            st.session_state.card_paths_en = []
+            st.session_state.card_review_approved = False
+            st.session_state.card_revisions_remaining = 0
+            _persist()
+            st.success(f"표지 시안 {len(variants)}종 생성 완료 — 아래에서 하나를 선택하세요.")
+        except ContentFilterError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            tb = traceback.format_exc()
+            _log_error("표지 시안 생성 실패", tb)
+            st.error(f"시안 생성 실패: {type(exc).__name__}: {exc}")
+            st.code(tb)
+        finally:
+            prog.empty()
+        st.rerun()
+
+    _variants = st.session_state.get("cover_variants") or {}
+    _selected_variant = None
+    if _variants:
+        st.markdown("**② 시안 선택**")
+        _vids = [v for v in design_variant_ids() if v in _variants]
+        vcols = st.columns(len(_vids))
+        for _i, _vid in enumerate(_vids):
+            with vcols[_i]:
+                if Path(_variants[_vid]).exists():
+                    st.image(
+                        _variants[_vid],
+                        use_container_width=True,
+                        caption=design_variant_label(_vid),
+                    )
+        _selected_variant = st.radio(
+            "완성본에 사용할 시안",
+            _vids,
+            format_func=design_variant_label,
+            horizontal=True,
+            key="selected_variant",
+        )
+        st.caption(
+            f"선택: **{design_variant_label(_selected_variant)}** — 이 디자인으로 표지·본문 전체를 제작합니다."
+        )
+    else:
+        st.caption("먼저 **표지 시안 3종**을 생성하고 하나를 선택하면 전체 카드 생성이 활성화됩니다.")
+
+    st.markdown("**③ 선택한 시안으로 한국어 카드 생성**")
+    if st.button(
+        "한국어 카드 생성 (1단계)",
+        disabled=_gen_phase != "locked"
+        or not st.session_state.plan_dict
+        or not _variants
+        or not _selected_variant,
         key="btn_card_render",
     ):
         _widgets_into_plan_dict()
@@ -549,18 +650,19 @@ def main() -> None:
         prog = st.progress(0)
         try:
             nslides = len(plan_d.get("slides") or [])
-            total_steps = max(1, nslides * 2)
+            total_steps = max(1, nslides)
             done = [0]
 
-            def _prog_combined(_cur: int, _total: int) -> None:
+            def _prog_ko(_cur: int, _total: int) -> None:
                 done[0] += 1
                 prog.progress(min(1.0, done[0] / total_steps))
 
             ko_dir = out_root / "cards" / "ko"
-            en_dir = out_root / "cards" / "en"
             ko_dir.mkdir(parents=True, exist_ok=True)
-            en_dir.mkdir(parents=True, exist_ok=True)
 
+            _variant_block = design_variant_block(
+                st.session_state.get("selected_variant")
+            )
             with st.spinner(f"한국어 카드 생성 중… ({img_model}, 페이지당 1~2분 소요)"):
                 paths_ko = generate_plan_card_jpegs(
                     client,
@@ -570,11 +672,12 @@ def main() -> None:
                     out_dir=ko_dir,
                     cover_template_full=cover_full,
                     body_template_full=body_full,
-                    progress_callback=_prog_combined if nslides else None,
+                    progress_callback=_prog_ko if nslides else None,
                     copy_locale="ko",
                     section_tone=section_tone,
                     theme_id=theme_id,
                     logo_pos=logo_pos,
+                    concept_style_block=_variant_block,
                     title_color=eff_title_color,
                     body_color=eff_body_color,
                     single_page_template=single_page,
@@ -584,39 +687,8 @@ def main() -> None:
             st.session_state.card_review_approved = False
             st.session_state.card_revisions_remaining = 0
             _persist()
-
-            paths_en: list = []
-            try:
-                with st.spinner(f"영어 번역 → 영어 카드 생성 중… ({img_model})"):
-                    plan_en = translate_plan_to_english(client, plan_d)
-                    paths_en = generate_plan_card_jpegs(
-                        client,
-                        img_model,
-                        plan_en,
-                        theme_desc=theme_desc,
-                        out_dir=en_dir,
-                        cover_template_full=cover_full,
-                        body_template_full=body_full,
-                        progress_callback=_prog_combined if nslides else None,
-                        copy_locale="en",
-                        section_tone=section_tone,
-                        theme_id=theme_id,
-                        logo_pos=logo_pos,
-                        title_color=eff_title_color,
-                        body_color=eff_body_color,
-                        single_page_template=single_page,
-                    )
-                st.session_state.card_paths_en = [str(p) for p in paths_en]
-                _persist()
-            except Exception as exc_en:
-                st.warning(
-                    f"한국어 카드는 생성되었지만 영어 세트 생성에 실패했습니다: {exc_en}\n\n"
-                    "한국어 카드로 계속 진행하거나 '카드 다시 생성'으로 영어 세트를 재시도하세요."
-                )
-
             st.success(
-                f"한국어 {len(paths_ko)}장"
-                + (f" + 영어 {len(paths_en)}장" if paths_en else " 생성 완료 (영어 세트 제외)")
+                f"한국어 {len(paths_ko)}장 생성 완료 — 아래 **5. 산출물 검토**에서 승인하면 영어 세트를 만듭니다."
             )
         except ContentFilterError as exc:
             st.error(str(exc))
@@ -646,9 +718,13 @@ def main() -> None:
                         st.image(p, use_container_width=True)
 
     st.divider()
-    st.subheader("5. 산출물 검토")
+    st.subheader("5. 산출물 검토 · 영어 세트")
+
+    if not st.session_state.card_paths:
+        st.info("먼저 **4단계**에서 한국어 카드를 생성하세요.")
+
     if st.button(
-        "산출물 검토 승인 (재생성 2회 허용)",
+        "한국어 산출물 승인 → 영어 생성 단계로 (한국어 재생성 2회 허용)",
         disabled=not st.session_state.card_paths or st.session_state.card_review_approved,
     ):
         st.session_state.card_review_approved = True
@@ -656,62 +732,42 @@ def main() -> None:
         _persist()
         st.rerun()
 
-    if st.button(
-        "카드 다시 생성",
-        disabled=not st.session_state.card_review_approved
-        or st.session_state.card_revisions_remaining <= 0
-        or not st.session_state.plan_dict,
-    ):
-        _widgets_into_plan_dict()
-        plan_d = st.session_state.plan_dict
-        if not plan_d or not _guard_plan(plan_d, context="카드 다시 생성"):
-            st.stop()
-        cover_full, body_full, single_page = _resolve_design_templates(
-            target_pages, multipage_variant
-        )
-        if not cover_full.strip() or (not single_page and not body_full.strip()):
-            st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
-            st.stop()
-        prog = st.progress(0)
-        try:
-            nslides = len(plan_d.get("slides") or [])
-            total_steps = max(1, nslides * 2)
-            done = [0]
-
-            def _prog2(_cur: int, _total: int) -> None:
-                done[0] += 1
-                prog.progress(min(1.0, done[0] / total_steps))
-
-            ko_dir = out_root / "cards" / "ko"
-            en_dir = out_root / "cards" / "en"
-            ko_dir.mkdir(parents=True, exist_ok=True)
-            en_dir.mkdir(parents=True, exist_ok=True)
-
-            with st.spinner(f"한국어 카드 재생성 중… ({img_model})"):
-                paths_ko = generate_plan_card_jpegs(
-                    client,
-                    img_model,
-                    plan_d,
-                    theme_desc=theme_desc,
-                    out_dir=ko_dir,
-                    cover_template_full=cover_full,
-                    body_template_full=body_full,
-                    progress_callback=_prog2 if nslides else None,
-                    copy_locale="ko",
-                    section_tone=section_tone,
-                    theme_id=theme_id,
-                    logo_pos=logo_pos,
-                    title_color=eff_title_color,
-                    body_color=eff_body_color,
-                    single_page_template=single_page,
-                )
-            st.session_state.card_paths = [str(p) for p in paths_ko]
-            st.session_state.card_paths_en = []
-            _persist()
-
-            paths_en: list = []
+    if st.session_state.card_review_approved:
+        _en_exists = bool(st.session_state.get("card_paths_en"))
+        if not _en_exists:
+            st.info("한국어 승인 완료 — 아래 버튼으로 **영어 세트**를 생성하세요.")
+        if st.button(
+            "영어 카드 다시 생성 (2단계)" if _en_exists else "영어 카드 생성 (2단계)",
+            disabled=not st.session_state.card_paths or not st.session_state.plan_dict,
+            key="btn_card_render_en",
+        ):
+            _widgets_into_plan_dict()
+            plan_d = st.session_state.plan_dict
+            if not plan_d or not _guard_plan(plan_d, context="영어 카드 생성"):
+                st.stop()
+            cover_full, body_full, single_page = _resolve_design_templates(
+                target_pages, multipage_variant
+            )
+            if not cover_full.strip() or (not single_page and not body_full.strip()):
+                st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
+                st.stop()
+            prog = st.progress(0)
             try:
-                with st.spinner(f"영어 번역 → 영어 카드 재생성 중… ({img_model})"):
+                nslides = len(plan_d.get("slides") or [])
+                total_steps = max(1, nslides)
+                done = [0]
+
+                def _prog_en(_cur: int, _total: int) -> None:
+                    done[0] += 1
+                    prog.progress(min(1.0, done[0] / total_steps))
+
+                en_dir = out_root / "cards" / "en"
+                en_dir.mkdir(parents=True, exist_ok=True)
+
+                _variant_block = design_variant_block(
+                    st.session_state.get("selected_variant")
+                )
+                with st.spinner(f"영어 번역 → 영어 카드 생성 중… ({img_model})"):
                     plan_en = translate_plan_to_english(client, plan_d)
                     paths_en = generate_plan_card_jpegs(
                         client,
@@ -721,30 +777,99 @@ def main() -> None:
                         out_dir=en_dir,
                         cover_template_full=cover_full,
                         body_template_full=body_full,
-                        progress_callback=_prog2 if nslides else None,
+                        progress_callback=_prog_en if nslides else None,
                         copy_locale="en",
                         section_tone=section_tone,
                         theme_id=theme_id,
                         logo_pos=logo_pos,
+                        concept_style_block=_variant_block,
                         title_color=eff_title_color,
                         body_color=eff_body_color,
                         single_page_template=single_page,
                     )
                 st.session_state.card_paths_en = [str(p) for p in paths_en]
-            except Exception as exc_en:
-                st.warning(f"영어 세트 재생성 실패(한국어는 완료): {exc_en}")
-            st.session_state.card_revisions_remaining -= 1
-            _persist()
-        except ContentFilterError as exc:
-            st.error(str(exc))
-        except Exception as exc:
-            tb = traceback.format_exc()
-            _log_error("카드 재생성 실패", tb)
-            st.error(f"재생성 실패: {type(exc).__name__}: {exc}")
-            st.code(tb)
-        finally:
-            prog.empty()
-        st.rerun()
+                _persist()
+                st.success(f"영어 {len(paths_en)}장 생성 완료.")
+            except ContentFilterError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                tb = traceback.format_exc()
+                _log_error("영어 카드 생성 실패", tb)
+                st.error(f"영어 카드 생성 실패: {type(exc).__name__}: {exc}")
+                st.code(tb)
+            finally:
+                prog.empty()
+            st.rerun()
+
+        if st.button(
+            "한국어 카드 다시 생성 (영어 세트 초기화)",
+            disabled=st.session_state.card_revisions_remaining <= 0
+            or not st.session_state.plan_dict,
+            help="한국어를 다시 만들면 기존 영어 세트는 비워지며, 다시 승인 없이 영어를 재생성할 수 있습니다.",
+        ):
+            _widgets_into_plan_dict()
+            plan_d = st.session_state.plan_dict
+            if not plan_d or not _guard_plan(plan_d, context="한국어 카드 다시 생성"):
+                st.stop()
+            cover_full, body_full, single_page = _resolve_design_templates(
+                target_pages, multipage_variant
+            )
+            if not cover_full.strip() or (not single_page and not body_full.strip()):
+                st.error("디자인 템플릿 파일을 찾을 수 없습니다.")
+                st.stop()
+            prog = st.progress(0)
+            try:
+                nslides = len(plan_d.get("slides") or [])
+                total_steps = max(1, nslides)
+                done = [0]
+
+                def _prog2(_cur: int, _total: int) -> None:
+                    done[0] += 1
+                    prog.progress(min(1.0, done[0] / total_steps))
+
+                ko_dir = out_root / "cards" / "ko"
+                ko_dir.mkdir(parents=True, exist_ok=True)
+
+                _variant_block = design_variant_block(
+                    st.session_state.get("selected_variant")
+                )
+                with st.spinner(f"한국어 카드 재생성 중… ({img_model})"):
+                    paths_ko = generate_plan_card_jpegs(
+                        client,
+                        img_model,
+                        plan_d,
+                        theme_desc=theme_desc,
+                        out_dir=ko_dir,
+                        cover_template_full=cover_full,
+                        body_template_full=body_full,
+                        progress_callback=_prog2 if nslides else None,
+                        copy_locale="ko",
+                        section_tone=section_tone,
+                        theme_id=theme_id,
+                        logo_pos=logo_pos,
+                        concept_style_block=_variant_block,
+                        title_color=eff_title_color,
+                        body_color=eff_body_color,
+                        single_page_template=single_page,
+                    )
+                st.session_state.card_paths = [str(p) for p in paths_ko]
+                st.session_state.card_paths_en = []
+                st.session_state.card_revisions_remaining -= 1
+                _persist()
+                st.success("한국어 카드 재생성 완료 — 영어 세트를 다시 생성하세요.")
+            except ContentFilterError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                tb = traceback.format_exc()
+                _log_error("카드 재생성 실패", tb)
+                st.error(f"재생성 실패: {type(exc).__name__}: {exc}")
+                st.code(tb)
+            finally:
+                prog.empty()
+            st.rerun()
+        st.caption(f"한국어 재생성 잔여 횟수: {st.session_state.card_revisions_remaining}")
+    else:
+        st.caption("한국어 카드를 **승인**하면 영어 세트 생성 버튼이 활성화됩니다.")
 
     st.divider()
     st.subheader("6. 최종 승인 · ZIP 다운로드")
