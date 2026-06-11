@@ -1,0 +1,77 @@
+# 재정경제부 카드뉴스 본문 템플릿 (참고: 국장님믿고갑조/템플릿(본문).txt)
+id: mofe_body
+label: 본문형 800×1000 (템플릿 본문)
+ref: 국장님믿고갑조/템플릿(본문).txt
+canvas:
+  width: 800
+  height: 1000
+# 안전 여백: 좌우 55~70, 상하 40~60 → 기본값 60/50
+margins:
+  x: 60
+  y: 48
+  bottom_reserve: 78
+palette:
+  page_bg: "#F6F8F3"
+  page_bg_alt: "#F7F8F1"
+  card_white: "#FFFFFF"
+  title: "#111111"
+  body: "#333333"
+  subtle: "#666666"
+  footnote: "#777777"
+  capsule_bg: "#FFFFFF"
+  capsule_text: "#111111"
+  on_stripe: "#FFFFFF"
+# 템플릿2 §2-2 섹션 컬러
+section_tones:
+  neutral:
+    stripe: "#4D99D8"
+    title_on_page: "#111111"
+  green:
+    stripe: "#13824B"
+    title_on_page: "#0F7A45"
+  blue:
+    stripe: "#4D99D8"
+    title_on_page: "#236EA8"
+  purple:
+    stripe: "#7C70C4"
+    title_on_page: "#5C4FA8"
+  orange:
+    stripe: "#ED8D4D"
+    title_on_page: "#C45A20"
+# 800×1000 기준 권장 크기 (§3-3), font_scale로 배율 조정
+sizes:
+  series_capsule: 23
+  head_copy_small: 21
+  main_title: 48
+  bullet: 31
+  footnote: 20
+  cover_series_on_band: 26
+  cover_head: 22
+  cover_slide_title: 44
+  closing_main: 34
+  closing_sub: 26
+layout:
+  top_stripe_height: 6
+  cover_band_height: 200
+  capsule_radius: 22
+  white_card_radius: 26
+  white_card_margin_x: 52
+  white_card_top: 168
+  white_card_width: 696
+  white_card_height: 720
+logo_box:
+  top_left: [52, 40, 160, 56]
+  top_right: [588, 40, 160, 56]
+  bottom_center: [120, 928, 560, 58]
+character_slot:
+  bottom_right: [480, 620, 280, 340]
+variants:
+  cover:
+    background: "#F4F5EF"
+    use_color_band: true
+  body:
+    background: "#F6F8F3"
+    use_top_stripe: true
+  closing:
+    background: "#F7F8F1"
+    generous_margin: true

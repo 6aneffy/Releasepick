@@ -1,0 +1,220 @@
+# Multi-Page Card News (2~5 Pages) Style Selection
+
+## Purpose
+
+사용자가 카드뉴스 페이지 수를 2~5장으로 선택한 경우 AI는 업로드된 정책자료를 먼저 분석한 후 가장 적합한 디자인 컨셉을 추천한다.
+
+디자인 생성 전 아래 3가지 컨셉을 썸네일과 함께 제공하고 사용자가 최종 선택하도록 한다.
+
+---
+
+# AI 자동 분류 규칙
+
+업로드된 자료의 주요 키워드를 분석하여 추천 컨셉을 결정한다.
+
+## ① 종합경제정책 및 성장
+
+추천 키워드
+
+* 경제정책
+* 경제성장
+* 성장전략
+* 산업정책
+* 수출
+* 투자
+* 기업지원
+* 경제활력
+* 혁신성장
+* 국가경쟁력
+
+예시
+
+* 경제정책방향
+* 하반기 경제정책방향
+* 기업투자 활성화 대책
+* 수출지원 정책
+* 혁신성장 전략
+
+---
+
+## ② 세금 및 복지혜택
+
+추천 키워드
+
+* 세금
+* 세제
+* 감면
+* 공제
+* 환급
+* 복지
+* 지원금
+* 장려금
+* 바우처
+* 청년지원
+* 서민지원
+
+예시
+
+* 근로장려금
+* 자녀장려금
+* 세액공제
+* 세제혜택
+* 민생지원정책
+* 소상공인 지원
+
+---
+
+## ③ 미래경제 및 친환경
+
+추천 키워드
+
+* 미래산업
+* AI
+* 디지털
+* 탄소중립
+* ESG
+* 녹색성장
+* 친환경
+* 신재생에너지
+* 미래기술
+* 혁신기술
+
+예시
+
+* 탄소중립 정책
+* AI 산업육성
+* 디지털 전환
+* 그린뉴딜
+* 미래산업 육성전략
+
+---
+
+# 컨셉 1
+
+## 종합경제정책 및 성장
+
+### 추천 상황
+
+경제정책, 산업정책, 성장전략, 수출입 정책, 기업지원 정책
+
+### 디자인 키워드
+
+* 성장
+* 혁신
+* 경제 활성화
+* 투자
+* 생산성
+
+### 썸네일 생성 프롬프트
+
+Clean flat vector illustration for government economic policy news card. Professional office environment with upward growth charts, glowing light bulb representing innovation, connected gears symbolizing economic systems and policy execution. Corporate blue and pastel green color palette, minimalist composition, clean white background, trustworthy government communication style, modern infographic elements, high resolution, social media card design, no text, no photorealism, no 3D rendering, no complex details.
+
+### 표지 페이지 특징
+
+* 성장 그래프
+* 경제 아이콘
+* 기업 친화적 이미지
+* 정책 신뢰감 강조
+
+### 설명 페이지 특징
+
+* 인포그래픽 중심
+* 수치 시각화
+* 경제 지표 강조
+
+---
+
+# 컨셉 2
+
+## 세금 및 복지혜택
+
+### 추천 상황
+
+세금정책, 세제개편, 복지정책, 지원사업, 환급정책
+
+### 디자인 키워드
+
+* 혜택
+* 지원
+* 생활안정
+* 금융
+* 복지
+
+### 썸네일 생성 프롬프트
+
+Minimal isometric illustration representing tax benefits and financial welfare. Modern piggy bank, smartphone displaying transfer confirmation and check marks, organized document folders and benefit icons. Friendly yet trustworthy design, warm yellow and professional navy palette, clean layout, government information card style, social media optimized composition, high resolution, no text, no photorealistic objects, no 3D rendering, simple geometric illustration.
+
+### 표지 페이지 특징
+
+* 지원금 강조
+* 혜택 아이콘
+* 생활밀착형 이미지
+
+### 설명 페이지 특징
+
+* 대상자 설명
+* 신청절차 설명
+* 혜택 요약
+
+---
+
+# 컨셉 3
+
+## 미래경제 및 친환경
+
+### 추천 상황
+
+탄소중립, AI, 디지털전환, 미래산업, 친환경 정책
+
+### 디자인 키워드
+
+* 미래
+* 혁신기술
+* 지속가능성
+* 친환경
+* 디지털
+
+### 썸네일 생성 프롬프트
+
+Modern flat vector design for future economy and green innovation policy. Smart city skyline with wind turbines, solar panels, digital network connections and sustainable technology elements. Tech blue and eco green color palette, optimistic and forward-looking atmosphere, clean light gray background, government innovation campaign style, minimalist composition, high resolution, no text, no photorealistic imagery, no 3D rendering.
+
+### 표지 페이지 특징
+
+* 미래도시
+* 디지털 네트워크
+* 친환경 에너지
+
+### 설명 페이지 특징
+
+* 정책 효과 시각화
+* ESG 및 친환경 요소 활용
+* 기술혁신 이미지 활용
+
+---
+
+# 사용자 선택 화면
+
+어떤 스타일로 제작할까요?
+
+① 종합경제정책 및 성장
+
+* 경제정책
+* 성장전략
+* 산업지원
+* 수출입 정책
+
+② 세금 및 복지혜택
+
+* 세금정책
+* 환급 및 공제
+* 복지지원
+* 민생정책
+
+③ 미래경제 및 친환경
+
+* AI
+* 디지털 전환
+* 탄소중립
+* 미래산업
+
+※ AI가 분석한 추천 컨셉을 기본 선택값으로 표시한다.
