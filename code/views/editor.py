@@ -37,10 +37,16 @@ from template_catalog import (
     concept_plan_block,
     concepts_for_pages,
     get_concept,
+    load_one_page_template_text,
     page_group,
     recommend_concept_id,
 )
-from template_resources import load_body_template_text, load_cover_template_text
+from template_resources import (
+    DEFAULT_MULTIPAGE_VARIANT,
+    load_body_template_text,
+    load_cover_template_text,
+    multipage_variant_labels,
+)
 from template_thumbnails import generate_thumbnails_for_pages
 
 from state import (
@@ -81,6 +87,24 @@ _SNS_READY = bool(
     and BUFFER_API_KEY
     and BUFFER_CHANNEL_ID
 )
+
+
+# ---------- Helpers ----------
+
+def _resolve_design_templates(
+    target_pages: int, multipage_variant: str
+) -> tuple[str, str, bool]:
+    """1장이면 포스터 템플릿만, 2장 이상이면 선택한 변형 (v1/v2) 의 표지·본문.
+
+    Returns (cover_full, body_full, single_page).
+    """
+    if target_pages == 1:
+        return load_one_page_template_text(), "", True
+    return (
+        load_cover_template_text(multipage_variant),
+        load_body_template_text(multipage_variant),
+        False,
+    )
 
 
 # ---------- Step bodies ----------
@@ -145,6 +169,27 @@ def step_upload(client: OpenAI) -> None:
             st.session_state.concept_confirmed = False
             st.session_state.concept_thumb_paths = {}
 
+        if target_pages == 1:
+            st.caption("1장 제작 — 포스터형 템플릿 (`themes/template1/템플릿-1.txt`) 적용")
+            st.session_state.multipage_variant = DEFAULT_MULTIPAGE_VARIANT
+        else:
+            v_labels = multipage_variant_labels()
+            v_ids = list(v_labels.keys())
+            cur = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
+            chosen = st.radio(
+                "디자인 템플릿 (2장 이상)",
+                v_ids,
+                index=v_ids.index(cur) if cur in v_ids else 0,
+                format_func=lambda v: v_labels.get(v, v),
+                horizontal=True,
+                key="multipage_variant_radio",
+            )
+            st.session_state.multipage_variant = chosen
+            st.caption(
+                "선택한 템플릿이 기획안·카드 생성에 모두 적용됩니다. "
+                "변경 시 기획·카드를 다시 생성하세요."
+            )
+
 
 def step_plan(client: OpenAI) -> None:
     section_header(2, "내용 분석 · 기획안")
@@ -171,6 +216,9 @@ def step_plan(client: OpenAI) -> None:
                     st.session_state.press_text,
                     target_pages=target_pages,
                     concept_style_block=plan_block,
+                    template_variant=st.session_state.get(
+                        "multipage_variant", DEFAULT_MULTIPAGE_VARIANT
+                    ),
                 )
                 st.session_state.plan_dict = plan.to_json_dict()
                 st.session_state.plan_phase = "draft"
@@ -477,11 +525,16 @@ def step_generate(client: OpenAI) -> None:
         plan_d = st.session_state.plan_dict
         if not plan_d or not guard_plan(plan_d, context="카드 생성"):
             st.stop()
-        cover_full = load_cover_template_text()
-        body_full = load_body_template_text()
-        if not cover_full.strip() or not body_full.strip():
+        target_pages = st.session_state.get("target_pages", 5)
+        mv = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
+        cover_full, body_full, single_page = _resolve_design_templates(
+            target_pages, mv
+        )
+        if not cover_full.strip():
             st.error("템플릿 파일을 찾을 수 없습니다.")
             st.stop()
+        title_color = da["title_color"] if da["use_custom_title"] else None
+        body_color = da["body_color"] if da["use_custom_body"] else None
         prog = st.progress(0)
         try:
             nslides = len(plan_d.get("slides") or [])
@@ -506,22 +559,35 @@ def step_generate(client: OpenAI) -> None:
                 theme_id=da["theme_id"],
                 logo_pos=da["logo_pos"],
                 concept_style_block=img_concept_block,
+                single_page_template=single_page,
+                title_color=title_color,
+                body_color=body_color,
             )
-            with st.spinner(f"한·영 카드 생성 중… ({img_model})"):
+            with st.spinner(f"한국어 카드 생성 중… ({img_model})"):
                 paths_ko = generate_plan_card_jpegs(
                     client, img_model, plan_d,
                     out_dir=ko_dir, copy_locale="ko", **common,
                 )
-                plan_en = translate_plan_to_english(client, plan_d)
-                paths_en = generate_plan_card_jpegs(
-                    client, img_model, plan_en,
-                    out_dir=en_dir, copy_locale="en", **common,
-                )
             st.session_state.card_paths = [str(p) for p in paths_ko]
-            st.session_state.card_paths_en = [str(p) for p in paths_en]
+            persist()
+
+            paths_en: list[Path] = []
+            try:
+                with st.spinner(f"영어 카드 생성 중… ({img_model})"):
+                    plan_en = translate_plan_to_english(client, plan_d)
+                    paths_en = generate_plan_card_jpegs(
+                        client, img_model, plan_en,
+                        out_dir=en_dir, copy_locale="en", **common,
+                    )
+                st.session_state.card_paths_en = [str(p) for p in paths_en]
+            except Exception as exc:
+                st.warning(f"영어 카드 생성 실패 (한국어는 정상): {exc}")
+
             st.session_state.card_review_approved = False
             st.session_state.card_revisions_remaining = 0
-            st.success(f"한국어 {len(paths_ko)}장 + 영어 {len(paths_en)}장 생성 완료")
+            st.success(
+                f"한국어 {len(paths_ko)}장 + 영어 {len(paths_en)}장 생성 완료"
+            )
             persist()
         except ContentFilterError as exc:
             st.error(str(exc))

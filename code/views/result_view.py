@@ -20,8 +20,12 @@ from image_gen import (
 from models import CardNewsPlan
 from package_export import build_export_zip_bytes
 from plan_llm import translate_plan_to_english
-from template_catalog import concept_image_block
-from template_resources import load_body_template_text, load_cover_template_text
+from template_catalog import concept_image_block, load_one_page_template_text
+from template_resources import (
+    DEFAULT_MULTIPAGE_VARIANT,
+    load_body_template_text,
+    load_cover_template_text,
+)
 
 from state import guard_plan, persist, widgets_into_plan_dict
 from ui.components import panel_title, pill, section_header
@@ -154,9 +158,17 @@ def _regenerate_all(client: OpenAI) -> None:
     plan_d = st.session_state.plan_dict
     if not plan_d or not guard_plan(plan_d, context="카드 다시 생성"):
         st.stop()
-    cover_full = load_cover_template_text()
-    body_full = load_body_template_text()
-    if not cover_full.strip() or not body_full.strip():
+    target_pages = st.session_state.get("target_pages", 5)
+    mv = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
+    if target_pages == 1:
+        cover_full = load_one_page_template_text()
+        body_full = ""
+        single_page = True
+    else:
+        cover_full = load_cover_template_text(mv)
+        body_full = load_body_template_text(mv)
+        single_page = False
+    if not cover_full.strip():
         st.error("템플릿 파일을 찾을 수 없습니다.")
         st.stop()
 
@@ -178,6 +190,8 @@ def _regenerate_all(client: OpenAI) -> None:
         if st.session_state.concept_confirmed
         else None
     )
+    title_color = da["title_color"] if da["use_custom_title"] else None
+    body_color = da["body_color"] if da["use_custom_body"] else None
 
     prog = st.progress(0)
     try:
@@ -198,19 +212,27 @@ def _regenerate_all(client: OpenAI) -> None:
             theme_id=da["theme_id"],
             logo_pos=da["logo_pos"],
             concept_style_block=img_concept_block,
+            single_page_template=single_page,
+            title_color=title_color,
+            body_color=body_color,
         )
-        with st.spinner(f"한·영 카드 재생성… ({img_model})"):
+        with st.spinner(f"한국어 카드 재생성… ({img_model})"):
             paths_ko = generate_plan_card_jpegs(
                 client, img_model, plan_d,
                 out_dir=ko_dir, copy_locale="ko", **common,
             )
-            plan_en = translate_plan_to_english(client, plan_d)
-            paths_en = generate_plan_card_jpegs(
-                client, img_model, plan_en,
-                out_dir=en_dir, copy_locale="en", **common,
-            )
         st.session_state.card_paths = [str(p) for p in paths_ko]
-        st.session_state.card_paths_en = [str(p) for p in paths_en]
+        persist()
+        try:
+            with st.spinner(f"영어 카드 재생성… ({img_model})"):
+                plan_en = translate_plan_to_english(client, plan_d)
+                paths_en = generate_plan_card_jpegs(
+                    client, img_model, plan_en,
+                    out_dir=en_dir, copy_locale="en", **common,
+                )
+            st.session_state.card_paths_en = [str(p) for p in paths_en]
+        except Exception as exc:
+            st.warning(f"영어 카드 재생성 실패 (한국어는 정상): {exc}")
         if st.session_state.card_revisions_remaining > 0:
             st.session_state.card_revisions_remaining -= 1
         persist()
