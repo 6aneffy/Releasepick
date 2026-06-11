@@ -18,6 +18,7 @@ from content_filter import (
     scan_text,
 )
 from models import CardNewsPlan
+from template_catalog import load_one_page_template_text
 from template_resources import load_body_template_text, load_cover_template_text
 
 MAX_PLAN_SAFETY_RETRIES = 2
@@ -51,17 +52,46 @@ JSON_SCHEMA_BLOCK = """다음 JSON 스키마에 맞게만 응답하세요. 다�
 """ + PLAN_EDITOR_SAFETY_RULES
 
 
-def _build_system_prompt(*, max_template_chars: int = 45000) -> str:
-    cover = load_cover_template_text()
-    body = load_body_template_text()
-    if len(cover) > max_template_chars:
-        cover = cover[: max_template_chars // 2] + "\n...[생략]...\n" + cover[-max_template_chars // 2 :]
-    if len(body) > max_template_chars:
-        body = body[: max_template_chars // 2] + "\n...[생략]...\n" + body[-max_template_chars // 2 :]
+def _clip_template_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars // 2] + "\n...[생략]...\n" + text[-max_chars // 2 :]
+
+
+def _json_schema_block(target_pages: int) -> str:
+    if target_pages != 1:
+        return JSON_SCHEMA_BLOCK
     return (
+        JSON_SCHEMA_BLOCK.replace(
+            "첫 슬라이드(cover) 문안·톤·정보 위계는 시스템에 제공된 [표지 템플릿] 전문의 규칙을 모두 따른다.",
+            "1장 카드뉴스는 시스템에 제공된 [1장 포스터형 템플릿] 전문만 따른다. "
+            "표지·본문 템플릿은 적용하지 않는다.",
+        ).replace(
+            "둘째 슬라이드부터 마지막까지는 [본문 템플릿] 전문의 규칙(캔버스, 색, 타이포, 레이아웃 패턴)을 모두 따른다.",
+            "1장 제작이므로 본문·맺음 슬라이드는 작성하지 않는다.",
+        )
+    )
+
+
+def _build_system_prompt(*, target_pages: int = 2, max_template_chars: int = 45000) -> str:
+    base = (
         "당신은 대한민국 공공기관 보도자료를 카드뉴스용으로 재구성하는 편집자입니다.\n"
         "입력은 보도자료 전문(한국어)입니다.\n\n"
-        + JSON_SCHEMA_BLOCK
+        + _json_schema_block(target_pages)
+    )
+    if target_pages == 1:
+        one_page = _clip_template_text(
+            load_one_page_template_text(), max_template_chars
+        )
+        return (
+            base
+            + "\n\n=== [1장 포스터형 템플릿] 전문 (유일한 디자인·문안 규격) ===\n"
+            + one_page
+        )
+    cover = _clip_template_text(load_cover_template_text(), max_template_chars)
+    body = _clip_template_text(load_body_template_text(), max_template_chars)
+    return (
+        base
         + "\n\n=== [표지 템플릿] 전문 (첫 페이지 기획 시 전부 반영) ===\n"
         + cover
         + "\n\n=== [본문 템플릿] 전문 (2페이지째 이후 기획 시 전부 반영) ===\n"
@@ -131,14 +161,27 @@ def _build_plan_user_message(
     concept_part = ""
     if concept_style_block and concept_style_block.strip():
         concept_part = f"\n=== [사용자 선택 디자인 컨셉] ===\n{concept_style_block.strip()}\n"
+    template_rules = (
+        "2) 1장 카드뉴스는 [1장 포스터형 템플릿] 전문만 따른다. "
+        "표지·본문 템플릿은 사용하지 않는다.\n"
+        if target_pages == 1
+        else (
+            "2) 첫 페이지(cover)는 [표지 템플릿] 전문의 구조·문체·요소를 모두 반영.\n"
+            "3) 둘째 페이지부터 마지막 페이지는 [본문 템플릿] 전문의 규칙을 모두 반영하고, "
+            "앱에서 선택한 테마·톤은 이후 단계에서 적용되므로 여기서는 문안 구조만 템플릿에 맞춘다.\n"
+        )
+    )
+    concept_rule = (
+        "3) [사용자 선택 디자인 컨셉]이 있으면 문안 톤·정보 위계·강조 요소에 반영한다.\n"
+        if target_pages == 1
+        else "4) [사용자 선택 디자인 컨셉]이 있으면 문안 톤·정보 위계·강조 요소에 반영한다.\n"
+    )
     return (
         "우선순위:\n"
         "1) 보도자료 사실만 사용, 왜곡 금지.\n"
         "1-1) 일본·북한 연상, 일제강점기·식민지 잔재, 보수·진보 등 정치 이념 갈등, 젠더·세대·지역 갈등, 혐오·비하 표현은 기획 문안에 넣지 않는다.\n"
-        "2) 첫 페이지(cover)는 [표지 템플릿] 전문의 구조·문체·요소를 모두 반영.\n"
-        "3) 둘째 페이지부터 마지막 페이지는 [본문 템플릿] 전문의 규칙을 모두 반영하고, "
-        "앱에서 선택한 테마·톤은 이후 단계에서 적용되므로 여기서는 문안 구조만 템플릿에 맞춘다.\n"
-        "4) [사용자 선택 디자인 컨셉]이 있으면 문안 톤·정보 위계·강조 요소에 반영한다.\n"
+        f"{template_rules}"
+        f"{concept_rule}"
         f"{press_note}"
         f"{concept_part}\n"
         f"target_pages={target_pages}\n"
@@ -179,7 +222,7 @@ def generate_plan(
     """
     if target_pages < 1:
         target_pages = 1
-    system = _build_system_prompt()
+    system = _build_system_prompt(target_pages=target_pages)
     user = _build_plan_user_message(
         press_text, target_pages, concept_style_block=concept_style_block
     )

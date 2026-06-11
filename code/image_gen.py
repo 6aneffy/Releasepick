@@ -191,46 +191,90 @@ def build_theme_description(
     return " | ".join(parts)
 
 
+def _custom_text_color_directives(
+    title_color: str | None,
+    body_color: str | None,
+    copy_locale: str,
+) -> str:
+    """사용자가 고른 제목/본문 글자색을 섹션 톤보다 우선 적용하도록 강제하는 지시문."""
+    lines: list[str] = []
+    if copy_locale == "en":
+        if title_color:
+            lines.append(
+                f"[USER TITLE TEXT COLOR — HIGHEST PRIORITY] Render ALL title/headline glyphs strictly in {title_color}. "
+                "This overrides the section tone color for text: the section tone applies only to bands, chips, "
+                "and accent shapes, NOT to the title text color."
+            )
+        if body_color:
+            lines.append(
+                f"[USER BODY TEXT COLOR — HIGHEST PRIORITY] Render all body/bullet text glyphs strictly in {body_color}, "
+                "overriding any default body text color in the spec."
+            )
+    else:
+        if title_color:
+            lines.append(
+                f"[제목 글자색 — 최우선] 제목·헤드라인의 '글자색'은 반드시 사용자 지정 {title_color}로 렌더한다. "
+                "섹션 톤 색은 상단 띠·배지·강조 도형에만 적용하고, 제목 글자색에는 적용하지 않는다."
+            )
+        if body_color:
+            lines.append(
+                f"[본문 글자색 — 최우선] 본문·불릿의 '글자색'은 반드시 사용자 지정 {body_color}로 렌더하며, "
+                "규격의 기본 본문색보다 이 설정을 우선한다."
+            )
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
 def build_section_tone_prompt_block(
     section_tone: str,
     theme_id: str = "mofe_body",
     *,
     for_cover: bool,
     copy_locale: str = "ko",
+    title_color: str | None = None,
+    body_color: str | None = None,
 ) -> str:
-    """섹션 컬러 톤을 hex·지시문으로 명시 (표지는 템플릿 기본 하늘색 예시보다 우선)."""
+    """섹션 컬러 톤을 hex·지시문으로 명시 (표지는 템플릿 기본 하늘색 예시보다 우선).
+
+    title_color/body_color가 주어지면 글자색은 섹션 톤보다 우선해 사용자 지정색으로 강제한다.
+    """
     pal = section_tone_palette(theme_id, section_tone)
     stripe = pal["stripe"]
-    title_c = pal["title_on_page"]
+    # 사용자가 제목색을 지정하면 그 색이 섹션 톤 팔레트 제목색을 대체한다.
+    title_c = title_color or pal["title_on_page"]
     label = SECTION_TONE_LABELS.get(section_tone, section_tone)
+    custom = _custom_text_color_directives(title_color, body_color, copy_locale)
     if copy_locale == "en":
         if for_cover:
             return (
                 "[COVER COLOR TONE — OVERRIDES default sky-blue examples in the spec below]\n"
                 f"User-selected section tone: {label} ({section_tone})\n"
                 f"Top header band, keyword badges, accent shapes — primary color: {stripe}\n"
-                f"Headline emphasis color: {title_c}\n"
+                f"Headline text color: {title_c}\n"
                 "Background: bright off-white or soft gradient harmonizing with this tone; "
                 "do NOT use default navy/sky-blue campaign background if tone is green/purple/orange.\n"
-            "Match inner pages in the same series.\n"
-        )
+                "Match inner pages in the same series.\n"
+                + custom
+            )
         return (
             "[BODY COLOR TONE — REQUIRED]\n"
-            f"Section tone: {label} — top stripe/accent: {stripe}, title emphasis: {title_c}\n"
+            f"Section tone: {label} — top stripe/accent: {stripe}, title text: {title_c}\n"
+            + custom
         )
     if for_cover:
         return (
             "[표지 컬러 톤 — 최우선 · 아래 표지 템플릿의 하늘색/블루 예시보다 이 설정이 우선]\n"
             f"사용자 선택 섹션 톤: {label} ({section_tone})\n"
             f"상단 컬러 밴드·헤더 영역·키워드 배지·강조 도형·띠 색상(주색): {stripe}\n"
-            f"표지 제목·헤드라인 강조색: {title_c}\n"
+            f"표지 제목·헤드라인 글자색: {title_c}\n"
             "배경은 선택 톤과 조화되는 밝은 오프화이트 또는 연한 그라데이션으로 구성한다. "
             "녹색 톤이면 하늘색·네이비 기본 캠페인 배경을 쓰지 말 것.\n"
             "본문 페이지와 동일한 섹션 컬러로 시리즈 전체 톤을 통일한다.\n"
+            + custom
         )
     return (
         "[본문 컬러 톤 — 필수 반영]\n"
-        f"섹션 톤: {label} — 상단 띠·액센트: {stripe}, 제목 강조: {title_c}\n"
+        f"섹션 톤: {label} — 상단 띠·액센트: {stripe}, 제목 글자색: {title_c}\n"
+        + custom
     )
 
 
@@ -245,6 +289,9 @@ def build_first_card_image_prompt(
     theme_id: str = "mofe_body",
     logo_pos: str = "bottom_center",
     concept_style_block: str = "",
+    single_page_template: bool = False,
+    title_color: str | None = None,
+    body_color: str | None = None,
 ) -> str:
     bullets = slide.get("bullets") or []
     blines = "\n".join(f"- {b}" for b in bullets) if bullets else ("(no bullets)" if copy_locale == "en" else "(불릿 없음)")
@@ -257,7 +304,31 @@ def build_first_card_image_prompt(
         f"표지 보조 불릿:\n{blines}\n"
         f"각주: {foot}\n"
     )
-    if copy_locale == "en":
+    if single_page_template:
+        if copy_locale == "en":
+            tail = (
+                "\n[작업 지시]\n"
+                "Create ONE finished single-page policy poster card. "
+                "Render ALL visible headline and body copy from [최우선] clearly in natural English. "
+                "Follow the full [1-PAGE POSTER DESIGN SPEC] below for layout, colors, typography, margins, 3D elements, CTA band, etc. "
+                "Do NOT use multi-page cover/body layout rules. "
+                "The design spec text may be in Korean; apply it as visual/layout rules regardless of language. "
+                "Draw the government logo per [ENGLISH IMAGE — AI-DRAWN LOGO]. Single professional image."
+                + build_english_logo_layout_block(logo_pos, theme_id)
+            )
+        else:
+            tail = (
+                "\n[작업 지시]\n"
+                "재정경제부 1장 포스터형 카드뉴스 1장을 생성한다. 위 [최우선] 문안을 한글로 선명하게 배치하고, "
+                "[컬러 톤]의 hex 색을 헤드라인·칩·CTA 밴드·강조에 반드시 적용한다. "
+                "[1장 포스터형 디자인 규격]의 레이아웃·타이포·여백·3D요소·정부 로고 배치를 반영한다. "
+                "표지·본문 멀티페이지 규격은 사용하지 않는다. 단일 완성 이미지, 정책 홍보용, 과장 없이 전문적으로."
+                + build_korean_logo_layout_block(logo_pos, theme_id)
+            )
+        spec_label = (
+            "[1장 포스터형 디자인 규격 — 레이아웃·구도 참고, 색상은 위 컬러 톤 우선]"
+        )
+    elif copy_locale == "en":
         tail = (
             "\n[작업 지시]\n"
             "Create ONE finished policy card-news COVER image. "
@@ -267,6 +338,7 @@ def build_first_card_image_prompt(
             "Draw the government logo per [ENGLISH IMAGE — AI-DRAWN LOGO]. Single professional image."
             + build_english_logo_layout_block(logo_pos, theme_id)
         )
+        spec_label = "[표지 디자인 규격 — 레이아웃·구도 참고, 색상은 위 컬러 톤 우선]"
     else:
         tail = (
             "\n[작업 지시]\n"
@@ -276,8 +348,14 @@ def build_first_card_image_prompt(
             "단일 완성 이미지, 정책 홍보용, 과장 없이 전문적으로."
             + build_korean_logo_layout_block(logo_pos, theme_id)
         )
+        spec_label = "[표지 디자인 규격 — 레이아웃·구도 참고, 색상은 위 컬러 톤 우선]"
     tone_block = build_section_tone_prompt_block(
-        section_tone, theme_id, for_cover=True, copy_locale=copy_locale
+        section_tone,
+        theme_id,
+        for_cover=True,
+        copy_locale=copy_locale,
+        title_color=title_color,
+        body_color=body_color,
     )
     spec = _clip_middle(
         cover_template_full,
@@ -285,7 +363,7 @@ def build_first_card_image_prompt(
     )
     concept_part = f"\n\n{concept_style_block.strip()}\n" if concept_style_block.strip() else ""
     body = _clip_middle(
-        f"{priority}\n\n{tone_block}{concept_part}\n\n[표지 디자인 규격 — 레이아웃·구도 참고, 색상은 위 컬러 톤 우선]\n"
+        f"{priority}\n\n{tone_block}{concept_part}\n\n{spec_label}\n"
         f"{spec}\n\n[현재 디자인 설정]\n{theme_desc}{tail}",
         PROMPT_MAX_CHARS + 2000,
     )
@@ -304,6 +382,8 @@ def build_body_card_image_prompt(
     theme_id: str = "mofe_body",
     logo_pos: str = "bottom_center",
     concept_style_block: str = "",
+    title_color: str | None = None,
+    body_color: str | None = None,
 ) -> str:
     bullets = slide.get("bullets") or []
     blines = "\n".join(f"- {b}" for b in bullets) if bullets else ("(no bullets)" if copy_locale == "en" else "(불릿 없음)")
@@ -337,7 +417,12 @@ def build_body_card_image_prompt(
             + build_korean_logo_layout_block(logo_pos, theme_id)
         )
     tone_block = build_section_tone_prompt_block(
-        section_tone, theme_id, for_cover=False, copy_locale=copy_locale
+        section_tone,
+        theme_id,
+        for_cover=False,
+        copy_locale=copy_locale,
+        title_color=title_color,
+        body_color=body_color,
     )
     spec = _clip_middle(
         body_template_full,
@@ -408,16 +493,28 @@ def generate_plan_card_jpegs(
     theme_id: str = "mofe_body",
     logo_pos: str = "bottom_center",
     concept_style_block: str = "",
+    single_page_template: bool = False,
+    title_color: str | None = None,
+    body_color: str | None = None,
 ) -> list[Path]:
-    """슬라이드별 전면 카드 이미지를 생성해 JPEG로 저장한다."""
+    """슬라이드별 전면 카드 이미지를 생성해 JPEG로 저장한다.
+
+    title_color/body_color가 주어지면 글자색을 섹션 톤보다 우선해 강제 적용한다.
+    """
     from io import BytesIO
 
     from PIL import Image
 
-    if not cover_template_full:
-        cover_template_full = load_cover_template_text()
-    if not body_template_full:
-        body_template_full = load_body_template_text()
+    if single_page_template:
+        if not cover_template_full:
+            from template_catalog import load_one_page_template_text
+
+            cover_template_full = load_one_page_template_text()
+    else:
+        if not cover_template_full:
+            cover_template_full = load_cover_template_text()
+        if not body_template_full:
+            body_template_full = load_body_template_text()
 
     assert_plan_safe(plan_dict)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -436,6 +533,9 @@ def generate_plan_card_jpegs(
                 theme_id=theme_id,
                 logo_pos=logo_pos,
                 concept_style_block=concept_style_block,
+                single_page_template=single_page_template,
+                title_color=title_color,
+                body_color=body_color,
             )
         else:
             prompt = build_body_card_image_prompt(
@@ -449,6 +549,8 @@ def generate_plan_card_jpegs(
                 theme_id=theme_id,
                 logo_pos=logo_pos,
                 concept_style_block=concept_style_block,
+                title_color=title_color,
+                body_color=body_color,
             )
         png_bytes = generate_image_png_bytes(client, model, prompt)
         if not png_bytes:

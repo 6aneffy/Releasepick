@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -42,16 +43,8 @@ from supabase_storage import (
     delete_objects,
     upload_card_images,
 )
-from template_catalog import (
-    concept_image_block,
-    concept_plan_block,
-    concepts_for_pages,
-    get_concept,
-    page_group,
-    recommend_concept_id,
-)
+from template_catalog import page_group
 from template_resources import load_body_template_text, load_cover_template_text
-from template_thumbnails import generate_thumbnails_for_pages
 
 CODE_DIR = Path(__file__).resolve().parent
 ROOT = CODE_DIR.parent
@@ -93,9 +86,6 @@ def _init_session() -> None:
         "card_revisions_remaining": 0,
         "logo_bytes": None,
         "character_bytes": None,
-        "concept_template_id": None,
-        "concept_confirmed": False,
-        "concept_thumb_paths": {},
         "target_pages_group": None,
         "instagram_caption": "",
         "instagram_uploaded_post_id": None,
@@ -122,13 +112,23 @@ def _snapshot() -> dict:
         "card_paths_en": st.session_state.get("card_paths_en", []),
         "press_text": st.session_state.get("press_text", ""),
         "pdf_name": st.session_state.get("pdf_name", ""),
-        "concept_template_id": st.session_state.get("concept_template_id"),
-        "concept_confirmed": st.session_state.get("concept_confirmed", False),
         "instagram_caption": st.session_state.get("instagram_caption", ""),
         "instagram_uploaded_post_id": st.session_state.get("instagram_uploaded_post_id"),
         "instagram_uploaded_keys": st.session_state.get("instagram_uploaded_keys", []),
         "instagram_cleanup_done": st.session_state.get("instagram_cleanup_done", False),
     }
+
+
+_ERROR_LOG = CODE_DIR / "_last_error.log"
+
+
+def _log_error(context: str, tb: str) -> None:
+    """트레이스백을 파일에 안전하게 기록 (stdout 미사용 — Streamlit 환경에서 print는 OSError 발생 가능)."""
+    try:
+        with _ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"\n=== {context} @ {datetime.now().isoformat()} ===\n{tb}\n")
+    except OSError:
+        pass
 
 
 def _persist() -> None:
@@ -243,9 +243,6 @@ def main() -> None:
     pg_group = page_group(target_pages)
     if st.session_state.get("target_pages_group") != pg_group:
         st.session_state.target_pages_group = pg_group
-        st.session_state.concept_template_id = None
-        st.session_state.concept_confirmed = False
-        st.session_state.concept_thumb_paths = {}
 
     if st.button("PDF에서 텍스트 추출", disabled=not st.session_state.pdf_bytes):
         with st.spinner("추출 중…"):
@@ -262,8 +259,6 @@ def main() -> None:
 
     st.divider()
     st.subheader("2. 기획안 (LLM)")
-    concept_id = st.session_state.concept_template_id if st.session_state.concept_confirmed else None
-    plan_block = concept_plan_block(concept_id)
     if st.button(
         "기획 생성",
         disabled=not st.session_state.press_text.strip(),
@@ -277,7 +272,6 @@ def main() -> None:
                     client,
                     st.session_state.press_text,
                     target_pages=target_pages,
-                    concept_style_block=plan_block,
                 )
                 st.session_state.plan_dict = plan.to_json_dict()
                 st.session_state.plan_phase = "draft"
@@ -381,98 +375,7 @@ def main() -> None:
             st.rerun()
 
     st.divider()
-    st.subheader("3. 디자인 컨셉 선택")
-    concepts = concepts_for_pages(target_pages)
-    if target_pages == 1:
-        st.caption("1장 제작 유형 — `themes/template1/템플릿-1.txt` 기준")
-    else:
-        st.caption(
-            f"{target_pages}장 제작 — `themes/template2` 멀티페이지 가이드 기준 "
-            "(2~5장 권장, 6장 이상도 동일 컨셉 적용)"
-        )
-
-    recommended_id = recommend_concept_id(st.session_state.press_text or "", target_pages)
-    if st.session_state.press_text.strip():
-        rec = get_concept(recommended_id)
-        if rec:
-            st.info(f"보도자료 분석 추천: **{rec.title_ko}** ({rec.subtitle_ko})")
-
-    if st.session_state.get("concept_template_id") not in {c.id for c in concepts}:
-        st.session_state.concept_template_id = recommended_id
-
-    thumb_paths: dict[str, str] = dict(st.session_state.get("concept_thumb_paths") or {})
-    if st.button("썸네일 미리보기 생성 (대략적 스타일)", type="primary"):
-        prog_t = st.progress(0)
-
-        def _thumb_prog(cur: int, total: int) -> None:
-            prog_t.progress(cur / max(1, total))
-
-        with st.spinner("컨셉 썸네일 3종 생성 중… (완성 카드 아님)"):
-            paths = generate_thumbnails_for_pages(
-                client,
-                st.session_state.session_id,
-                target_pages,
-                progress_callback=_thumb_prog,
-            )
-            thumb_paths = {k: str(v) for k, v in paths.items()}
-            st.session_state.concept_thumb_paths = thumb_paths
-        prog_t.empty()
-        st.success("썸네일 생성 완료")
-        st.rerun()
-
-    pick_cols = st.columns(3)
-    concept_ids = [c.id for c in concepts]
-    default_idx = (
-        concept_ids.index(st.session_state.concept_template_id)
-        if st.session_state.concept_template_id in concept_ids
-        else concept_ids.index(recommended_id)
-        if recommended_id in concept_ids
-        else 0
-    )
-    for col, concept in zip(pick_cols, concepts):
-        with col:
-            tp = thumb_paths.get(concept.id)
-            if tp and Path(tp).is_file():
-                st.image(tp, use_container_width=True)
-            else:
-                st.container(border=True).caption("썸네일 미생성")
-            st.markdown(f"**{concept.index}. {concept.title_ko}**")
-            st.caption(concept.subtitle_ko)
-            with st.expander("추천 용도"):
-                st.write(", ".join(concept.use_cases))
-
-    chosen = st.radio(
-        "어떤 스타일로 제작할까요?",
-        concept_ids,
-        index=default_idx,
-        format_func=lambda cid: get_concept(cid).title_ko if get_concept(cid) else cid,
-        key="concept_radio",
-        horizontal=True,
-    )
-    st.session_state.concept_template_id = chosen
-
-    c_conf, c_reset = st.columns(2)
-    with c_conf:
-        if st.button("컨셉 확정 → 카드 생성에 반영", disabled=not chosen):
-            st.session_state.concept_confirmed = True
-            _persist()
-            st.rerun()
-    with c_reset:
-        if st.button("컨셉 선택 초기화"):
-            st.session_state.concept_confirmed = False
-            st.session_state.concept_template_id = None
-            _persist()
-            st.rerun()
-
-    if st.session_state.concept_confirmed and st.session_state.concept_template_id:
-        sel = get_concept(st.session_state.concept_template_id)
-        if sel:
-            st.success(f"선택된 컨셉: **{sel.title_ko}** — 카드 이미지 생성에 반영됩니다.")
-    else:
-        st.warning("컨셉을 확정해야 카드 이미지에 디자인 스타일이 반영됩니다.")
-
-    st.divider()
-    st.subheader("4. 디자인 · 이미지 모델")
+    st.subheader("3. 디자인 · 이미지 모델")
     st.caption(
         "표지·본문 템플릿: `Releasepick/국장님믿고갑조/템플릿(표지).txt`, `템플릿(본문).txt` — 카드 생성 시 GPT Image 프롬프트에 포함됩니다."
     )
@@ -542,12 +445,10 @@ def main() -> None:
         body_color=body_color,
         logo_pos=logo_pos,
     )
-    img_concept_block = concept_image_block(
-        st.session_state.concept_template_id if st.session_state.concept_confirmed else None
-    )
-
+    eff_title_color = title_color if use_custom_title else None
+    eff_body_color = body_color if use_custom_body else None
     st.divider()
-    st.subheader("5. 카드 이미지 (JPEG)")
+    st.subheader("4. 카드 이미지 (JPEG)")
     out_root = Path(tempfile.gettempdir()) / "cardnews_exports" / st.session_state.session_id
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -565,7 +466,17 @@ def main() -> None:
             "- **카드 생성**: 통과하지 않은 기획은 API 호출 없이 중단"
         )
 
-    if st.button("카드 생성 (첫 렌더)", disabled=st.session_state.plan_phase != "locked" or not st.session_state.plan_dict):
+    _gen_phase = st.session_state.plan_phase
+    if _gen_phase != "locked":
+        st.info(
+            f"카드를 생성하려면 먼저 **2. 기획안** 단계에서 기획을 확정해야 합니다. "
+            f"(현재 단계: `{_gen_phase}`) → '기획 1차 승인' 후 '기획 확정 → 카드 생성 단계로'를 누르세요."
+        )
+    if st.button(
+        "카드 생성 (첫 렌더)",
+        disabled=_gen_phase != "locked" or not st.session_state.plan_dict,
+        key="btn_card_render",
+    ):
         _widgets_into_plan_dict()
         plan_d = st.session_state.plan_dict
         if not plan_d:
@@ -593,7 +504,7 @@ def main() -> None:
             ko_dir.mkdir(parents=True, exist_ok=True)
             en_dir.mkdir(parents=True, exist_ok=True)
 
-            with st.spinner(f"한국어 카드 생성 → 영어 번역 → 영어 카드 생성… ({img_model})"):
+            with st.spinner(f"한국어 카드 생성 중… ({img_model}, 페이지당 1~2분 소요)"):
                 paths_ko = generate_plan_card_jpegs(
                     client,
                     img_model,
@@ -607,34 +518,54 @@ def main() -> None:
                     section_tone=section_tone,
                     theme_id=theme_id,
                     logo_pos=logo_pos,
-                    concept_style_block=img_concept_block,
-                )
-                plan_en = translate_plan_to_english(client, plan_d)
-                paths_en = generate_plan_card_jpegs(
-                    client,
-                    img_model,
-                    plan_en,
-                    theme_desc=theme_desc,
-                    out_dir=en_dir,
-                    cover_template_full=cover_full,
-                    body_template_full=body_full,
-                    progress_callback=_prog_combined if nslides else None,
-                    copy_locale="en",
-                    section_tone=section_tone,
-                    theme_id=theme_id,
-                    logo_pos=logo_pos,
-                    concept_style_block=img_concept_block,
+                    title_color=eff_title_color,
+                    body_color=eff_body_color,
                 )
             st.session_state.card_paths = [str(p) for p in paths_ko]
-            st.session_state.card_paths_en = [str(p) for p in paths_en]
+            st.session_state.card_paths_en = []
             st.session_state.card_review_approved = False
             st.session_state.card_revisions_remaining = 0
-            st.success(f"한국어 {len(paths_ko)}장 + 영어 {len(paths_en)}장 생성 완료")
             _persist()
+
+            paths_en: list = []
+            try:
+                with st.spinner(f"영어 번역 → 영어 카드 생성 중… ({img_model})"):
+                    plan_en = translate_plan_to_english(client, plan_d)
+                    paths_en = generate_plan_card_jpegs(
+                        client,
+                        img_model,
+                        plan_en,
+                        theme_desc=theme_desc,
+                        out_dir=en_dir,
+                        cover_template_full=cover_full,
+                        body_template_full=body_full,
+                        progress_callback=_prog_combined if nslides else None,
+                        copy_locale="en",
+                        section_tone=section_tone,
+                        theme_id=theme_id,
+                        logo_pos=logo_pos,
+                        title_color=eff_title_color,
+                        body_color=eff_body_color,
+                    )
+                st.session_state.card_paths_en = [str(p) for p in paths_en]
+                _persist()
+            except Exception as exc_en:
+                st.warning(
+                    f"한국어 카드는 생성되었지만 영어 세트 생성에 실패했습니다: {exc_en}\n\n"
+                    "한국어 카드로 계속 진행하거나 '카드 다시 생성'으로 영어 세트를 재시도하세요."
+                )
+
+            st.success(
+                f"한국어 {len(paths_ko)}장"
+                + (f" + 영어 {len(paths_en)}장" if paths_en else " 생성 완료 (영어 세트 제외)")
+            )
         except ContentFilterError as exc:
             st.error(str(exc))
         except Exception as exc:
-            st.error(f"이미지 생성 실패: {exc}")
+            tb = traceback.format_exc()
+            _log_error("카드 생성 실패 (첫 렌더)", tb)
+            st.error(f"이미지 생성 실패: {type(exc).__name__}: {exc}")
+            st.code(tb)
         finally:
             prog.empty()
         st.rerun()
@@ -656,7 +587,7 @@ def main() -> None:
                         st.image(p, use_container_width=True)
 
     st.divider()
-    st.subheader("6. 산출물 검토")
+    st.subheader("5. 산출물 검토")
     if st.button(
         "산출물 검토 승인 (재생성 2회 허용)",
         disabled=not st.session_state.card_paths or st.session_state.card_review_approved,
@@ -693,7 +624,7 @@ def main() -> None:
             ko_dir.mkdir(parents=True, exist_ok=True)
             en_dir.mkdir(parents=True, exist_ok=True)
 
-            with st.spinner(f"한·영 카드 재생성… ({img_model})"):
+            with st.spinner(f"한국어 카드 재생성 중… ({img_model})"):
                 paths_ko = generate_plan_card_jpegs(
                     client,
                     img_model,
@@ -707,32 +638,45 @@ def main() -> None:
                     section_tone=section_tone,
                     theme_id=theme_id,
                     logo_pos=logo_pos,
-                    concept_style_block=img_concept_block,
-                )
-                plan_en = translate_plan_to_english(client, plan_d)
-                paths_en = generate_plan_card_jpegs(
-                    client,
-                    img_model,
-                    plan_en,
-                    theme_desc=theme_desc,
-                    out_dir=en_dir,
-                    cover_template_full=cover_full,
-                    body_template_full=body_full,
-                    progress_callback=_prog2 if nslides else None,
-                    copy_locale="en",
-                    section_tone=section_tone,
-                    theme_id=theme_id,
-                    logo_pos=logo_pos,
-                    concept_style_block=img_concept_block,
+                    title_color=eff_title_color,
+                    body_color=eff_body_color,
                 )
             st.session_state.card_paths = [str(p) for p in paths_ko]
-            st.session_state.card_paths_en = [str(p) for p in paths_en]
+            st.session_state.card_paths_en = []
+            _persist()
+
+            paths_en: list = []
+            try:
+                with st.spinner(f"영어 번역 → 영어 카드 재생성 중… ({img_model})"):
+                    plan_en = translate_plan_to_english(client, plan_d)
+                    paths_en = generate_plan_card_jpegs(
+                        client,
+                        img_model,
+                        plan_en,
+                        theme_desc=theme_desc,
+                        out_dir=en_dir,
+                        cover_template_full=cover_full,
+                        body_template_full=body_full,
+                        progress_callback=_prog2 if nslides else None,
+                        copy_locale="en",
+                        section_tone=section_tone,
+                        theme_id=theme_id,
+                        logo_pos=logo_pos,
+                        title_color=eff_title_color,
+                        body_color=eff_body_color,
+                    )
+                st.session_state.card_paths_en = [str(p) for p in paths_en]
+            except Exception as exc_en:
+                st.warning(f"영어 세트 재생성 실패(한국어는 완료): {exc_en}")
             st.session_state.card_revisions_remaining -= 1
             _persist()
         except ContentFilterError as exc:
             st.error(str(exc))
         except Exception as exc:
-            st.error(f"재생성 실패: {exc}")
+            tb = traceback.format_exc()
+            _log_error("카드 재생성 실패", tb)
+            st.error(f"재생성 실패: {type(exc).__name__}: {exc}")
+            st.code(tb)
         finally:
             prog.empty()
         st.rerun()
