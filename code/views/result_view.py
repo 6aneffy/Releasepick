@@ -160,6 +160,19 @@ def _regenerate_all(client: OpenAI) -> None:
     if not plan_d or not guard_plan(plan_d, context="카드 다시 생성"):
         st.stop()
     target_pages = st.session_state.get("target_pages", 5)
+    if target_pages == 1:
+        st.session_state.card_paths = []
+        st.session_state.card_paths_en = []
+        st.session_state.cover_variants = {}
+        if st.session_state.card_revisions_remaining > 0:
+            st.session_state.card_revisions_remaining -= 1
+        persist()
+        st.warning(
+            "1장 제작은 **4단계(이미지 생성)** 로 돌아가 "
+            "결과물 후보 3종을 다시 생성한 뒤 선택·확정하세요."
+        )
+        st.rerun()
+        return
     mv = st.session_state.get("multipage_variant", DEFAULT_MULTIPAGE_VARIANT)
     if target_pages == 1:
         cover_full = load_one_page_template_text()
