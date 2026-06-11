@@ -16,6 +16,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import job_store
+from buffer_publish import BufferError, create_instagram_post
+from caption_llm import (
+    DEFAULT_CAPTION_SYSTEM_PROMPT,
+    MAX_CAPTION_LEN,
+    generate_instagram_caption,
+)
 from content_filter import ContentFilterError, assert_plan_safe, scan_plan_dict
 from export_plan_pptx import build_plan_pptx_bytes
 from image_gen import (
@@ -30,6 +36,12 @@ from package_export import build_export_zip_bytes
 from pdf_extract import extract_text_from_pdf_bytes
 from plan_llm import generate_plan, translate_plan_to_english
 from render_cards import list_theme_ids
+from supabase_storage import (
+    SupabaseStorageError,
+    UploadedAsset,
+    delete_objects,
+    upload_card_images,
+)
 from template_catalog import (
     concept_image_block,
     concept_plan_block,
@@ -46,6 +58,20 @@ ROOT = CODE_DIR.parent
 _ENV = ROOT / ".env"
 load_dotenv(dotenv_path=_ENV, override=False)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "").strip()
+BUFFER_API_KEY = os.getenv("BUFFER_API_KEY", "").strip()
+BUFFER_CHANNEL_ID = os.getenv("BUFFER_CHANNEL_ID", "").strip()
+BUFFER_ORGANIZATION_ID = os.getenv("BUFFER_ORGANIZATION_ID", "").strip()
+_SNS_READY = bool(
+    SUPABASE_URL
+    and SUPABASE_SERVICE_ROLE_KEY
+    and SUPABASE_BUCKET
+    and BUFFER_API_KEY
+    and BUFFER_CHANNEL_ID
+)
 
 
 def _init_session() -> None:
@@ -71,6 +97,10 @@ def _init_session() -> None:
         "concept_confirmed": False,
         "concept_thumb_paths": {},
         "target_pages_group": None,
+        "instagram_caption": "",
+        "instagram_uploaded_post_id": None,
+        "instagram_uploaded_keys": [],
+        "instagram_cleanup_done": False,
         "_hydrated": False,
         "_seed_bump": -1,
     }
@@ -94,6 +124,10 @@ def _snapshot() -> dict:
         "pdf_name": st.session_state.get("pdf_name", ""),
         "concept_template_id": st.session_state.get("concept_template_id"),
         "concept_confirmed": st.session_state.get("concept_confirmed", False),
+        "instagram_caption": st.session_state.get("instagram_caption", ""),
+        "instagram_uploaded_post_id": st.session_state.get("instagram_uploaded_post_id"),
+        "instagram_uploaded_keys": st.session_state.get("instagram_uploaded_keys", []),
+        "instagram_cleanup_done": st.session_state.get("instagram_cleanup_done", False),
     }
 
 
@@ -733,6 +767,128 @@ def main() -> None:
             file_name="기획안_최종.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
+
+    if _SNS_READY and st.session_state.card_paths:
+        _render_section_instagram_upload(client)
+
+
+def _render_section_instagram_upload(client: OpenAI) -> None:
+    st.divider()
+    st.subheader("7. 인스타그램 자동 업로드 (Buffer)")
+
+    paths_ko = [Path(p) for p in st.session_state.card_paths if Path(p).exists()]
+    if not paths_ko:
+        st.info("렌더된 한국어 카드가 없습니다. 먼저 카드 생성을 마치세요.")
+        return
+    if len(paths_ko) > 10:
+        st.error(
+            f"카드 {len(paths_ko)}장 — Instagram 캐러셀은 최대 10장. 페이지 수를 줄여 다시 렌더하세요."
+        )
+        return
+
+    already_posted = bool(st.session_state.get("instagram_uploaded_post_id"))
+    if already_posted:
+        st.success(
+            f"이미 발행 완료. post_id={st.session_state.instagram_uploaded_post_id}"
+        )
+
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
+        if st.button("캡션 초안 생성", disabled=already_posted, key="btn_caption_draft"):
+            try:
+                with st.spinner("캡션 생성 중..."):
+                    caption = generate_instagram_caption(
+                        client,
+                        st.session_state.get("press_text", ""),
+                        st.session_state.get("plan_dict"),
+                    )
+                st.session_state.instagram_caption = caption
+            except ContentFilterError as exc:
+                st.error(f"캡션 안전 필터 차단:\n\n{exc}")
+            except Exception as exc:
+                st.error(f"캡션 생성 실패: {exc}")
+    with col_b:
+        st.caption(
+            "PDF 본문 + 기획안을 근거로 OpenAI가 한국어 캡션 초안을 작성합니다. "
+            "작성 요령은 `code/caption_llm.py`의 `DEFAULT_CAPTION_SYSTEM_PROMPT`를 편집해 조정하세요."
+        )
+
+    st.text_area(
+        "Instagram 캡션",
+        key="instagram_caption",
+        height=240,
+        max_chars=MAX_CAPTION_LEN,
+        disabled=already_posted,
+    )
+    caption_len = len(st.session_state.get("instagram_caption", ""))
+    st.caption(f"{caption_len} / {MAX_CAPTION_LEN}자")
+
+    upload_disabled = (
+        already_posted
+        or caption_len == 0
+        or caption_len > MAX_CAPTION_LEN
+    )
+    if st.button(
+        "인스타그램 업로드",
+        disabled=upload_disabled,
+        key="btn_instagram_upload",
+        type="primary",
+    ):
+        _do_instagram_upload(paths_ko)
+
+    pending_keys = st.session_state.get("instagram_uploaded_keys") or []
+    has_post = bool(st.session_state.get("instagram_uploaded_post_id"))
+    if has_post and pending_keys and not st.session_state.get("instagram_cleanup_done"):
+        st.divider()
+        st.caption(f"Supabase 잔존 파일 {len(pending_keys)}개")
+        if st.button("Supabase 임시 파일 정리", key="btn_supabase_cleanup"):
+            try:
+                delete_objects(pending_keys)
+                st.session_state.instagram_cleanup_done = True
+                st.session_state.instagram_uploaded_keys = []
+                _persist()
+                st.success("Supabase 임시 파일 삭제 완료.")
+            except Exception as ce:
+                st.error(f"삭제 실패: {ce}")
+
+
+def _do_instagram_upload(paths_ko: list[Path]) -> None:
+    caption = st.session_state.get("instagram_caption", "").strip()
+    session_id = st.session_state.session_id
+    assets: list[UploadedAsset] = []
+    try:
+        with st.spinner("Supabase 업로드 중..."):
+            assets = upload_card_images(paths_ko, session_id)
+        with st.spinner("Buffer 발행 요청 중..."):
+            post_id = create_instagram_post(
+                BUFFER_CHANNEL_ID,
+                [a.url for a in assets],
+                caption,
+            )
+        st.session_state.instagram_uploaded_post_id = post_id
+        st.session_state.instagram_uploaded_keys = [a.key for a in assets]
+        _persist()
+        st.success(f"발행 완료. post_id={post_id}")
+        st.info(
+            "Buffer가 비동기로 이미지를 가져가 Instagram에 업로드합니다(수초~수분 소요). "
+            "Instagram에 게시물이 정상 노출된 뒤 아래 'Supabase 임시 파일 정리' 버튼으로 원격 파일을 삭제하세요."
+        )
+    except SupabaseStorageError as exc:
+        st.error(f"Supabase 업로드 실패: {exc}")
+        if assets:
+            try:
+                delete_objects([a.key for a in assets])
+            except Exception:
+                pass
+    except BufferError as exc:
+        st.error(f"Buffer 발행 실패: {exc}")
+        if assets:
+            try:
+                delete_objects([a.key for a in assets])
+            except Exception:
+                pass
+    except Exception as exc:
+        st.error(f"업로드 실패: {exc}")
 
 
 if __name__ == "__main__":

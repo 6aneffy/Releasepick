@@ -8,6 +8,18 @@
 
 1. 저장소 루트 [`Releasepick/.env`](../.env)에 `OPENAI_API_KEY` 설정.
 2. (선택) `design.md`와 `themes/`를 기관 가이드에 맞게 조정.
+3. (선택) **Instagram 자동 업로드(Section 7)** 사용 시 `.env`에 다음 키 추가. 한 개라도 빠지면 Section 7이 자동 비활성화됩니다.
+
+   ```
+   SUPABASE_URL=
+   SUPABASE_SERVICE_ROLE_KEY=
+   SUPABASE_BUCKET=
+   BUFFER_API_KEY=
+   BUFFER_CHANNEL_ID=               # Buffer 대시보드 채널 설정 URL의 hex 24자리
+   BUFFER_ORGANIZATION_ID=          # Buffer 조직 ID (선택)
+   ```
+
+   캡션 작성 요령은 [`code/caption_llm.py`](code/caption_llm.py)의 `DEFAULT_CAPTION_SYSTEM_PROMPT` 상수를 편집해 조정합니다. PR 머지 가이드는 [`MERGE_GUIDE_SNS_UPLOAD.md`](MERGE_GUIDE_SNS_UPLOAD.md) 참조.
 
 ## 실행
 
