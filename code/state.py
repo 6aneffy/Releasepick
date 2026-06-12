@@ -39,6 +39,8 @@ SESSION_DEFAULTS: dict = {
     "result_active_idx": 0,
     "press_items_payload": [],
     "press_items_fetched_at": None,
+    "press_page": 0,
+    "upload_mode": "rss",
     "selected_press_ntt_id": None,
     "selected_attachment_name": "",
     "selected_attachment_ext": "",
