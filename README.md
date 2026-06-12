@@ -136,6 +136,17 @@ Releasepick/
 
 ## 4. 환경 설정
 
+### 4.0 사전 요구사항
+
+| 항목 | 권장 | 비고 |
+|---|---|---|
+| OS | Windows 10/11 (1차 타깃) · macOS 13+ · Ubuntu 22.04+ | 한글 폰트는 OS별로 경로가 다름 — §4.3 참조 |
+| Python | **3.11 ~ 3.12** | pydantic v2 / streamlit 1.28+ 호환. 3.13 은 일부 휠 미배포 가능 |
+| 패키지 매니저 | [`uv`](https://github.com/astral-sh/uv) 권장 (pip 도 가능) | Windows: `winget install astral-sh.uv` · macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| 디스크 | ≥ 1 GB (가상환경 · SQLite 스냅샷 · 카드 JPEG 캐시) | `data/jobs.sqlite` 는 세션마다 누적 — 주기적 정리 권장 (§11.3) |
+| 네트워크 | OpenAI / mofe.go.kr / (선택) Supabase · Buffer 아웃바운드 HTTPS | 사내 프록시 환경에서는 `HTTPS_PROXY` 환경변수 설정 필요 |
+| 한글 폰트 | Windows 기본 포함 (`malgun.ttf`) · macOS/Linux 는 별도 설치 필요 | §4.3 / §5.2 트러블슈팅 |
+
 ### 4.1 필수 — OpenAI
 
 저장소 루트 `Releasepick/.env` 에 다음 키를 설정합니다 (없으면 Step 2 부터 오류).
@@ -172,19 +183,52 @@ BUFFER_ORGANIZATION_ID=         # 선택
 
 ## 5. 실행
 
+### 5.1 첫 실행 (Windows / PowerShell)
+
 ```powershell
-# 의존성 설치
-cd c:\Users\sangh\Releasepick
+# 1) 저장소 클론 + 진입
+git clone <repo-url> Releasepick
+cd Releasepick
+
+# 2) 가상환경 + 의존성
+uv venv                              # .venv 생성 (Python 3.11+ 자동 선택)
 uv pip install -r requirements.txt
 
-# 앱 실행
+# 3) 환경변수
+copy .env-sample .env
+notepad .env                         # OPENAI_API_KEY 최소 1개 필수
+
+# 4) 앱 실행
 cd code
 uv run python -m streamlit run app.py
+```
+
+### 5.1.a macOS / Linux
+
+```bash
+git clone <repo-url> Releasepick && cd Releasepick
+uv venv && uv pip install -r requirements.txt
+cp .env-sample .env && ${EDITOR:-vi} .env
+cd code && uv run python -m streamlit run app.py
 ```
 
 > Windows 에서 `uv run streamlit ...` 직접 호출은 trampoline 오류가 발생할 수 있어 `python -m streamlit` 형태를 권장합니다.
 
 브라우저에서 `http://localhost:8501` → 「홈」 카드의 **"보도자료 업로드하고 시작하기"** 버튼으로 진입.
+
+### 5.2 트러블슈팅
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| `OPENAI_API_KEY not set` (Step 2 진입 시 오류) | `.env` 미생성 또는 키 누락 | `.env-sample` 복사 후 키 채우기. 가상환경 활성화 상태에서 실행했는지 확인 |
+| Streamlit 가 열리지만 화면이 빈 칸 | `streamlit run` 을 `code/` 가 아닌 루트에서 실행 | `cd code` 후 `python -m streamlit run app.py` |
+| 한글 글자가 □ 로 깨짐 (Pillow 직접 렌더 경로) | 시스템에 `malgun.ttf` 가 없음 (주로 macOS/Linux) | NanumGothic 등 한글 TTF 설치 후 [`render_cards.py:16-17`](code/render_cards.py#L16-L17) 의 폰트 후보에 경로 추가 |
+| Step 1 RSS 가 503/ConnectionReset | mofe.go.kr WAF 일시 차단 | 「새로고침」 버튼으로 캐시 클리어 후 30초~1분 대기 (백오프 재시도 자동) |
+| Step 4 이미지 생성이 멈춤 | OpenAI 응답 지연 또는 안전 필터 차단 | 터미널 stderr 확인 (`ContentFilterError` 면 기획 텍스트 수정) |
+| Step 6 가 비활성화 | Supabase/Buffer 5개 키 중 누락 | [`editor.py:96-104`](code/views/editor.py#L96-L104) 확인 후 `.env` 보강 |
+| 새로고침 후 단계가 1로 돌아감 | `data/jobs.sqlite` 가 비어 있거나 `session_id` 가 새로 발급됨 | 같은 브라우저 세션에서 새로고침해야 복원됨 — 시크릿 모드 변경 X |
+| `uv run streamlit` Windows trampoline 오류 | uv 의 console_scripts 트램폴린 버그 | `python -m streamlit run app.py` 로 우회 |
+| 사내 프록시에서 OpenAI 호출 실패 | HTTPS 프록시 미설정 | PowerShell 에서 `$env:HTTPS_PROXY="http://proxy:8080"` 후 재실행 |
 
 ---
 
@@ -307,7 +351,138 @@ Supabase Storage (private bucket)            Buffer GraphQL
 
 ---
 
-## 9. 참고 문서
+## 9. 확장 가이드
+
+운영 중 자주 발생하는 5가지 확장 시나리오에 대한 변경 지점만 모았습니다. 모든 변경은 **한 모듈로 격리**되도록 설계되어 있어 다른 단계의 회귀 위험이 낮습니다.
+
+### 9.1 새 부처 / 다른 RSS 추가
+
+대상: 다른 정부 부처(예: 행정안전부, 과학기술정보통신부)로 확장.
+
+1. [`code/press_release.py`](code/press_release.py) 상단 상수 (`RSS_URL`, `DETAIL_URL_TEMPLATE`, `BASE_URL`) 를 부처별 dict 로 분리.
+2. Step 1 UI ([`code/views/editor.py`](code/views/editor.py)) 에 부처 선택 셀렉트 추가 → 선택값을 `fetch_recent_releases(agency=...)` 인자로 전달.
+3. 영문 로고 워드마크는 [`code/english_logo.py`](code/english_logo.py) 의 `MINISTRY_WORDMARK` 상수와 [`image_gen.py`](code/image_gen.py) 의 영문 프롬프트 두 군데 동시 수정 (예: `Ministry of the Interior and Safety`).
+4. (선택) 부처 로고 PNG 를 `data/logo_<agency>.png` 로 추가 후 [`render_cards.py`](code/render_cards.py) 의 로고 박스 경로 분기.
+
+### 9.2 새 카드 템플릿(디자인 변형) 추가
+
+대상: 「재정경제부 3」 같은 신규 디자인 변형.
+
+1. [`themes/template2/템플릿3/`](themes/template2/) 디렉토리 생성 → 표지/본문 원문 txt 작성 (v1/v2 와 동일 구조).
+2. [`code/template_catalog.py`](code/template_catalog.py) 의 카탈로그에 신규 컨셉 등록 (이름, 추천 페이지 수 범위, 썸네일 키).
+3. [`code/template_resources.py`](code/template_resources.py) 의 `load_cover_template_text` / `load_body_template_text` 분기 추가.
+4. (선택) [`code/template_thumbnails.py`](code/template_thumbnails.py) 로 미리보기 썸네일 사전 생성.
+
+### 9.3 LLM 모델 교체 (gpt-5-mini → gpt-5 / 클로드 등)
+
+| 위치 | 호출 | 교체 포인트 |
+|---|---|---|
+| 기획 생성 | [`code/plan_llm.py`](code/plan_llm.py) | `MODEL` 상수 + `client.chat.completions.create(model=...)` |
+| 영문 번역 | 동일 파일 `translate_plan_to_english` | 동일 상수 사용 |
+| 캡션 생성 | [`code/caption_llm.py`](code/caption_llm.py) | `CAPTION_MODEL` 상수 |
+| 이미지 생성 | [`code/image_gen.py`](code/image_gen.py) | `IMAGE_MODEL` 상수 (`gpt-image-1` 계열만 호환) |
+
+다른 LLM 공급자(Anthropic 등)로 바꾸려면 `openai.OpenAI` 클라이언트 호출을 추상화한 어댑터를 [`code/plan_llm.py`](code/plan_llm.py) 에 도입한 뒤 위 4 군데를 일괄 위임하는 방식을 권장합니다. Pydantic 스키마(`CardNewsPlan`) 는 그대로 재사용 가능합니다.
+
+### 9.4 안전 필터 키워드 / 카테고리 추가
+
+[`code/content_filter.py`](code/content_filter.py) 한 파일만 수정합니다.
+
+1. `BANNED_TERMS` (한국어 키워드 dict) 에 카테고리·키워드 추가.
+2. `IMAGE_VISUAL_SAFETY_BLOCK` (영문 negative prompt) 에 대응 영문 표현 추가.
+3. `PLAN_EDITOR_SAFETY_RULES` (system prompt) 에 새 규칙 1줄 추가.
+4. 단위 테스트가 없으므로 `assert_plan_safe()` 가 위반 케이스에서 `ContentFilterError` 를 던지는지 REPL 로 1회 검증.
+
+### 9.5 새 SNS 채널 추가 (X, Threads, Facebook)
+
+현재 Step 6 는 Buffer GraphQL `createPost` 한 진입점만 사용 — Buffer 채널 ID 만 바꾸면 같은 코드로 X/Threads/Facebook 발행이 가능합니다.
+
+- Buffer 가 지원하지 않는 채널(예: 카카오톡 채널)을 추가하려면 [`code/buffer_publish.py`](code/buffer_publish.py) 옆에 `kakao_publish.py` 같은 새 모듈을 만들고, [`code/views/editor.py`](code/views/editor.py) Step 6 의 채널 토글에 분기 추가.
+- 이미지 호스팅은 [`code/supabase_storage.py`](code/supabase_storage.py) 의 `upload_card_images()` / `cleanup_card_images()` 인터페이스를 재사용 가능.
+
+---
+
+## 10. 운영 · 디버깅 · 로깅
+
+### 10.1 로그 / 디버그
+
+- Streamlit 기본 로그: 실행 터미널 stdout/stderr. Python 예외는 모두 화면 상단 빨간 배너로 표시.
+- 추가 디버그: 환경변수 `STREAMLIT_LOGGER_LEVEL=debug` 후 재실행.
+- LLM 응답 원본 확인: [`code/plan_llm.py`](code/plan_llm.py) `_call_openai()` 의 `response` 객체에 브레이크포인트 — 토큰 사용량(`response.usage`)도 동시에 확인 가능.
+
+### 10.2 비용 모니터링
+
+- 1건당 대략 비용: 기획 LLM ~$0.01, 카드 이미지 GPT Image N장 × ~$0.04, 영문 세트 추가 N장 — 합계 보통 **$0.3 ~ $1.0 / 건**.
+- 정확한 모니터링은 [OpenAI Usage 대시보드](https://platform.openai.com/usage) 에서 일자별 토큰·이미지 호출량 확인.
+- 비용 절감 팁: Step 4 에서 영문 세트는 발행 직전에만 생성 / 페이지 수를 슬라이더로 미리 제한 / Step 4 표지 시안 3종 단계에서 불만족 시 재생성하지 말고 Step 2 기획 텍스트부터 수정.
+
+### 10.3 SQLite 스냅샷 관리
+
+`data/jobs.sqlite` 는 세션마다 누적되어 GB 단위로 커질 수 있습니다.
+
+```powershell
+# 주기적 정리 — 7일 이상 된 스냅샷 삭제
+cd c:\Users\sangh\Releasepick
+uv run python -c "from code.job_store import purge_old; purge_old(days=7)"
+
+# 완전 초기화 (모든 진행중 세션 손실)
+del data\jobs.sqlite
+```
+
+> `purge_old` 가 없으면 `job_store.py` 에 7~15줄로 추가 가능 — 현재 자동 정리는 비활성.
+
+### 10.4 재현 가능한 버그 리포트
+
+1. 사용한 보도자료 PDF/HWPX 파일명 + nttId.
+2. 어느 Step 에서 발생했는지.
+3. 터미널 마지막 50줄 (`OPENAI_API_KEY` 등 비밀값 마스킹).
+4. (가능하면) `data/jobs.sqlite` 사본 또는 `session_id`.
+
+---
+
+## 11. 로드맵 · 알려진 이슈
+
+### 11.1 로드맵 (작성 시점 기준)
+
+- [ ] HWP(구버전) 본문 추출 — 외부 변환기(예: `hwp5txt`) 도입 검토
+- [ ] 스캔 PDF OCR — Tesseract 또는 OpenAI Vision fallback
+- [ ] 부처 다중 지원 (§9.1) — 행정안전부 / 과학기술정보통신부
+- [ ] 카드뉴스 시안 비교 뷰(A/B/C 동시 비교 → 1클릭 채택)
+- [ ] 비용 표시 패널 — 토큰·이미지 호출 누적치를 사이드바에 실시간 표시
+- [ ] 로컬 폰트 자동 다운로드 — macOS/Linux 첫 실행 시 NanumGothic 자동 설치
+
+### 11.2 알려진 이슈
+
+| 이슈 | 영향 | 회피책 |
+|---|---|---|
+| mofe.go.kr WAF 가 ConnectionReset 으로 응답하는 시간대 존재 | Step 1 RSS 로딩 실패 | 30초~1분 대기 후 새로고침 — 자동 백오프 재시도 3회 |
+| GPT Image 가 한국어 글자를 깨뜨릴 때가 있음 | 카드 본문 글자 깨짐 | Step 3 「Pillow 직접 렌더 경로」 강제 사용 또는 페이지별 재생성 (최대 2회) |
+| Streamlit 1.36+ 에서 `st.cache_data` 의 SHA 충돌 경고 | 콘솔 노이즈 | 무시 가능 — 기능엔 영향 없음 |
+| Buffer 의 Instagram 캐러셀 최대 10장 한도 | 11장 이상 카드 발행 불가 | Step 6 가 자동 차단. 페이지 수를 10 이하로 설정 |
+
+---
+
+## 12. 기여 · 라이선스
+
+### 12.1 기여 절차
+
+1. 이슈 또는 사내 채널에 변경 의도 공유 → 영향 범위 합의.
+2. **feature 브랜치**에서 작업 (`feature/<short-desc>`). main 직접 푸시 금지.
+3. PR 본문에 (a) 변경 요약 (b) 영향 단계(Step 1~6) (c) 테스트 방법 명시.
+4. Step 6 (SNS 업로드) 관련 변경은 반드시 [`MERGE_GUIDE_SNS_UPLOAD.md`](MERGE_GUIDE_SNS_UPLOAD.md) 의 회귀 체크리스트 통과.
+5. 안전 필터 관련 변경은 §9.4 의 REPL 검증 결과를 PR 에 첨부.
+
+### 12.2 커밋 메시지 컨벤션
+
+`<type>: <subject>` — type ∈ `feat / fix / docs / refactor / chore / ui / safety`. 본문은 한국어 권장 (담당자 회람용).
+
+### 12.3 라이선스
+
+내부 시연 / 행정 활용 목적의 비공개 프로젝트입니다. 외부 공개·재배포 전에는 보도자료 원본(저작권)·로고 사용권·OpenAI 출력물 라이선스 검토가 선행되어야 합니다.
+
+---
+
+## 13. 참고 문서
 
 - [`design.md`](design.md) — 카드뉴스 디자인 톤앤매너 (담당자/디자이너용)
 - [`MERGE_GUIDE_SNS_UPLOAD.md`](MERGE_GUIDE_SNS_UPLOAD.md) — Section 6 (Instagram 업로드) 머지·회귀 방지 가이드
