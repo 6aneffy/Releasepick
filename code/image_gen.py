@@ -166,6 +166,65 @@ _LABEL_GUARD = (
     "Only render the actual copy values, never the field names.\n"
 )
 
+# 본문 이미지 생성 시 템플릿 예시 문안이 기획안을 덮어쓰는 것을 막는다.
+_CONTENT_FROM_PLAN_GUARD = (
+    "\n[문안 출처 규칙 — 매우 중요]\n"
+    "이미지에 표시할 모든 한글/영문 카피는 **오직 위 [최우선] 블록**의 슬라이드 제목·불릿·각주에서만 가져온다.\n"
+    "아래 [본문 디자인 규격]·[표지 디자인 규격] 안의 예시 페이지, 샘플 표/카드, "
+    "가입·판매·투자·펀드·한입경제·국민성장펀드 등 **채워진 데모 문안·수치**는 "
+    "레이아웃·색·타이포 참고용일 뿐이며 **절대 이미지에 글자로 그리지 말 것**.\n"
+    "Do NOT copy any sample/demo text from the design spec into the image. "
+    "Only render copy from the [최우선] block above.\n"
+)
+
+# 템플릿 파일에 포함된 '채워진 예시 페이지' 섹션 — 이미지 프롬프트에서 제거
+_BODY_EXAMPLE_SECTION_MARKERS = (
+    "## 11. 페이지별 권장 구성 예시",
+    "## 11. 빠른 시작 (HTML/CSS 예시)",
+)
+_COVER_EXAMPLE_SECTION_MARKERS = (
+    "## 10. 제작 예시",
+    "## 11. 카드뉴스 표지 제작 절차",
+)
+
+
+def _strip_template_examples(spec: str, markers: tuple[str, ...]) -> str:
+    """채워진 샘플 페이지/제작 예시 섹션을 잘라 레이아웃 가이드만 남긴다."""
+    cut_at = len(spec)
+    for marker in markers:
+        idx = spec.find(marker)
+        if idx != -1:
+            cut_at = min(cut_at, idx)
+    if cut_at < len(spec):
+        spec = spec[:cut_at].rstrip()
+    return spec
+
+
+# 레이아웃 다이어그램에 박혀 있는 시리즈별 데모 문구 → 일반 플레이스홀더
+_LAYOUT_DEMO_REPLACEMENTS = (
+    ("🔑 한입경제 #5", "🔑 [시리즈명]"),
+    ("🔑 한입경제 #6", "🔑 [시리즈명]"),
+    ("한입경제 #5", "[시리즈명]"),
+    ("한입경제 #6", "[시리즈명]"),
+    ("국민성장펀드", "[주제명]"),
+)
+
+
+def _sanitize_layout_demo_copy(spec: str) -> str:
+    for old, new in _LAYOUT_DEMO_REPLACEMENTS:
+        spec = spec.replace(old, new)
+    return spec
+
+
+def _prepare_body_spec_for_prompt(body_template_full: str) -> str:
+    spec = _strip_template_examples(body_template_full, _BODY_EXAMPLE_SECTION_MARKERS)
+    return _sanitize_layout_demo_copy(spec)
+
+
+def _prepare_cover_spec_for_prompt(cover_template_full: str) -> str:
+    spec = _strip_template_examples(cover_template_full, _COVER_EXAMPLE_SECTION_MARKERS)
+    return _sanitize_layout_demo_copy(spec)
+
 
 # 표지(1페이지) 디자인 시안 3종 — 레이아웃 배치 / 폰트 정렬 / 3D 소스를 달리한다.
 # 선택한 시안의 block을 concept_style_block으로 전달하면 표지·본문 전체에 동일 스타일이 적용된다.
@@ -420,8 +479,9 @@ def build_first_card_image_prompt(
         title_color=title_color,
         body_color=body_color,
     )
+    cover_spec = _prepare_cover_spec_for_prompt(cover_template_full)
     spec = _clip_middle(
-        cover_template_full,
+        cover_spec,
         PROMPT_MAX_CHARS - len(priority) - len(tone_block) - len(theme_desc) - len(tail) - 120,
     )
     concept_part = f"\n\n{concept_style_block.strip()}\n" if concept_style_block.strip() else ""
@@ -475,9 +535,11 @@ def build_body_card_image_prompt(
     else:
         tail = (
             "\n[작업 지시]\n"
-            "재정경제부 카드뉴스 본문(또는 맺음) 페이지 1장을 생성한다. "
-            "[본문 디자인 규격]의 캔버스·색체·타이포·헤더·캡슐·여백·3D 일러스트·정부 로고를 반영하고, "
-            "위 [최우선] 문안을 한글로 선명하게 배치한다. 단일 완성 이미지."
+            "재정경제부 카드뉴스 본문(또는 맺음) 페이지 1장을 생성한다.\n"
+            "【문안 우선】오직 위 [최우선]의 슬라이드 제목·불릿·각주만 한글로 선명하게 배치한다. "
+            "디자인 규격 속 예시·데모 문안(가입·판매·투자·펀드·한입경제 등)은 절대 렌더링하지 않는다.\n"
+            "[본문 디자인 규격]의 캔버스·색체·타이포·헤더·캡슐·여백·3D 일러스트(모모/페페)·정부 로고를 반영하고, "
+            "표지와 동일한 시리즈 톤(배경·포인트 컬러·캐릭터)을 유지한다. 단일 완성 이미지."
             + build_korean_logo_layout_block(logo_pos, theme_id)
         )
     tone_block = build_section_tone_prompt_block(
@@ -488,13 +550,21 @@ def build_body_card_image_prompt(
         title_color=title_color,
         body_color=body_color,
     )
+    body_spec = _prepare_body_spec_for_prompt(body_template_full)
     spec = _clip_middle(
-        body_template_full,
-        PROMPT_MAX_CHARS - len(priority) - len(tone_block) - len(theme_desc) - len(tail) - 80,
+        body_spec,
+        PROMPT_MAX_CHARS
+        - len(priority)
+        - len(_CONTENT_FROM_PLAN_GUARD)
+        - len(tone_block)
+        - len(theme_desc)
+        - len(tail)
+        - 80,
     )
     concept_part = f"\n\n{concept_style_block.strip()}\n" if concept_style_block.strip() else ""
     body = _clip_middle(
-        f"{priority}\n\n{tone_block}{concept_part}\n\n[본문 디자인 규격 — 아래 전문을 모두 반영]\n{spec}\n\n"
+        f"{priority}{_CONTENT_FROM_PLAN_GUARD}\n\n{tone_block}{concept_part}\n\n"
+        f"[본문 디자인 규격 — 레이아웃·색·타이포만 참고, 문안은 [최우선]만 사용]\n{spec}\n\n"
         f"[현재 디자인 설정]\n{theme_desc}{tail}",
         PROMPT_MAX_CHARS + 2000,
     )
